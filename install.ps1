@@ -31,7 +31,7 @@ function Find-Python {
         try {
             $extra = @()
             if ($candidate.Length -gt 1) { $extra += $candidate[1..($candidate.Length - 1)] }
-            $ok = & $candidate[0] @extra -c "import sys; print(sys.version_info >= (3, 9))" 2>$null
+            $ok = & $candidate[0] @extra -c "import sys; print(sys.version_info >= (3, 10))" 2>$null
             if ($ok -match "True") { return ,$candidate }
         } catch {}
     }
@@ -45,14 +45,14 @@ Say "== Allinone: Claude Code + OmniRoute + FreeLLMAPI ==" "Green"
 # ---------------------------------------------------------------- Python
 $py = Find-Python
 if (-not $py) {
-    Say "Python 3.9+ was not found." "Yellow"
+    Say "Python 3.10+ was not found." "Yellow"
     if ((Have-Winget) -and (Ask "Install Python 3.12 with winget now?")) {
         winget install -e --id Python.Python.3.12 --accept-source-agreements --accept-package-agreements
         Refresh-Path
         $py = Find-Python
     }
     if (-not $py) {
-        Say "Install Python 3.9+ from https://www.python.org/downloads/ (tick 'Add python.exe to PATH'), then run install.cmd again." "Red"
+        Say "Install Python 3.10+ from https://www.python.org/downloads/ (tick 'Add python.exe to PATH'), then run install.cmd again." "Red"
         exit 1
     }
 }

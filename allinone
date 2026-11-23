@@ -6,5 +6,5 @@ for py in python3 python; do
     exec "$py" "$DIR/allinone.py" "$@"
   fi
 done
-echo "[Allinone] Python 3.9+ is required." >&2
+echo "[Allinone] Python 3.10+ is required." >&2
 exit 1

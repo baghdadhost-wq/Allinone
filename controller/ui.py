@@ -24,6 +24,10 @@ def setup_streams() -> None:
             pass
 
 
+# Make every print safe from the first import on (pipes on Windows default to cp1252).
+setup_streams()
+
+
 def _color_enabled() -> bool:
     global _COLOR
     if _COLOR is not None:

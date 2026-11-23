@@ -92,7 +92,7 @@ def doctor(ctx) -> bool:
         rows.append([mark, name, detail])
 
     py = sys.version_info
-    add("Python", py >= (3, 9), f"{platform.python_version()} ({sys.executable})")
+    add("Python", py >= (3, 10), f"{platform.python_version()} ({sys.executable})")
     git = procs.which("git")
     add("Git", bool(git), git or tr("missing — {h}", "غير موجود — {h}", h=git_hint()))
 
