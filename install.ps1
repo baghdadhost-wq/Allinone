@@ -42,6 +42,15 @@ function Have-Winget { return [bool](Get-Command winget -ErrorAction SilentlyCon
 
 Say "== Allinone: Claude Code + OmniRoute + FreeLLMAPI ==" "Green"
 
+# Refuse protected system folders (an admin PowerShell starts in C:\Windows\System32).
+if ($Root.StartsWith($env:windir, [System.StringComparison]::OrdinalIgnoreCase) -or
+    $Root.StartsWith($env:ProgramFiles, [System.StringComparison]::OrdinalIgnoreCase)) {
+    Say "Allinone is inside a protected Windows folder: $Root" "Red"
+    Say "Move it to your user folder, for example:" "Yellow"
+    Say "  cd `$HOME ; git clone https://github.com/baghdadhost-wq/Allinone.git ; cd Allinone ; .\install.cmd" "Yellow"
+    exit 1
+}
+
 # ---------------------------------------------------------------- Python
 $py = Find-Python
 if (-not $py) {
