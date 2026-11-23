@@ -59,8 +59,10 @@ flowchart TD
 ```powershell
 git clone https://github.com/baghdadhost-wq/Allinone.git
 cd Allinone
-install.cmd
+.\install.cmd
 ```
+
+> في PowerShell يجب كتابة `.\` قبل اسم الملف (`.\install.cmd` و`.\allinone.cmd`)، لأن PowerShell لا يشغّل الملفات من المجلد الحالي بدونها. في نافذة cmd العادية يكفي `install.cmd`.
 
 يفحص `install.cmd` وجود Python وGit، ويعرض تثبيتهما عبر `winget` إن لم يجدهما. بعدها ينزّل Node.js وOmniRoute وFreeLLMAPI وClaude Code، ثم يسألك إن كنت تريد إضافة `allinone` إلى PATH.
 
@@ -77,7 +79,7 @@ cd Allinone
 ## التشغيل
 
 ```bash
-allinone          # على Windows (أو .\allinone.cmd)
+.\allinone.cmd   # على Windows (أو allinone فقط بعد إضافته إلى PATH وفتح طرفية جديدة)
 ./allinone        # على macOS / Linux
 ```
 
