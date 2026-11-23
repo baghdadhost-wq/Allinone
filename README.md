@@ -187,6 +187,49 @@ allinone update omniroute --latest
 
 إصدارات البوابتين مثبّتة في `config/allinone.jsonc`، ما يضمن أن ما يعمل اليوم يبقى يعمل. لرفعها عدّل `version` أو `ref` هناك، أو استخدم `--latest`. تعديلاتك على الكود المصدري تُطبَّق تلقائياً بعد كل تحديث.
 
+## الحذف (إلغاء التثبيت)
+
+كل ما يثبّته Allinone موجود داخل مجلده فقط: Node.js والبوابتان وClaude Code في `runtime/`، والبيانات في `data/`. لا يثبّت شيئاً في النظام، لذا يكفي حذف المجلد. الخطوات:
+
+**1. أوقف البوابات إن كانت تعمل:**
+
+```powershell
+.\allinone.cmd gateway stop omniroute
+.\allinone.cmd gateway stop freellmapi
+```
+
+**2. احذف Allinone من PATH** (فقط إن وافقت على إضافته أثناء التثبيت). نفّذ في PowerShell عادي:
+
+```powershell
+$p = [Environment]::GetEnvironmentVariable("Path", "User")
+[Environment]::SetEnvironmentVariable("Path", (($p -split ";") | Where-Object { $_ -and $_ -notlike "*\Allinone" }) -join ";", "User")
+```
+
+**3. احذف المجلد.** اخرج منه أولاً، وأغلق أي برنامج يستخدمه (مثل VS Code)، ثم:
+
+```powershell
+cd $HOME
+Remove-Item -Recurse -Force "$HOME\Allinone"
+```
+
+على macOS / Linux:
+
+```bash
+./allinone gateway stop omniroute; ./allinone gateway stop freellmapi
+cd ~ && rm -rf ~/Allinone
+rm -f ~/.local/bin/allinone      # إن كنت أنشأت هذا الاختصار
+```
+
+> **تنبيه:** حذف المجلد يحذف أيضاً `data/`، وفيه مفاتيح المزودين وكلمات مرور لوحات التحكم والذاكرة والمهام. إن أردت الاحتفاظ بها فانسخ المجلد `data` إلى مكان آخر أولاً، ثم ضعه في المجلد الجديد بعد إعادة التثبيت.
+
+**حذف التثبيت فقط مع الإبقاء على بياناتك وإعداداتك:** احذف المجلد `runtime` وحده، وعند الحاجة أعد التثبيت بالأمر `.\install.cmd`.
+
+**إن كان المجلد داخل `C:\Windows\System32`** (يحدث عند تنزيله من PowerShell يعمل كمسؤول): افتح PowerShell **كمسؤول** وانسخ هذا المسار حرفياً دون أي تغيير:
+
+```powershell
+Remove-Item -Recurse -Force C:\Windows\System32\Allinone
+```
+
 ## حل المشاكل
 
 ابدأ بـ `allinone doctor`، ثم راجع **[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)**. سجلات البوابات في `data/logs/` (`allinone gateway logs omniroute`).
