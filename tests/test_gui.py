@@ -535,6 +535,71 @@ class GuiServerTests(unittest.TestCase):
         self.assertFalse(th.is_alive())
         self.assertEqual(len(self.of(box["events"], "saved")), 1)
 
+    def test_report_timing_tells_waiting_from_work(self):
+        from unittest import mock
+        with mock.patch.dict(os.environ, {"FAKE_WAIT": "2.6"}):
+            ev = self.chat(text="install TIMED", gateway="fake")
+        conv_id = self.of(ev, "conversation")[0]["id"]
+        meta = self.of(ev, "saved")[0]["meta"]
+        kinds = [e["k"] for e in meta["timeline"]]
+        for k in ("gateway_ready", "launch", "init", "model_start", "first_token", "tool_call", "tool_done", "result", "exit"):
+            self.assertIn(k, kinds)
+        tool = next(p for p in meta["parts"] if p.get("kind") == "tool")
+        self.assertGreaterEqual(tool["t_done"] - tool["t_call"], 0.5)
+        tm = gui.analyze_timing(meta)
+        self.assertGreaterEqual(tm["cats"]["model_wait"], 5.0)       # two ~2.6 s waits for the model
+        self.assertGreaterEqual(tm["cats"]["tools"], 0.5)            # the command ran ~0.6 s
+        self.assertEqual(len(tm["waits"]), 2)
+        self.assertIn("انتظار للبوابة/النموذج", tm["verdict"])
+        text = json.loads(self.call(f"/api/conversations/{conv_id}/report", {})[1])["text"]
+        for needle in ("⏱ أُرسل الطلب:", "⏱ أُرسل الأمر:", "اكتمل بالكامل:", "مدة التنفيذ:", "صدرت النتيجة النهائية:",
+                       "[نص الرد] ⏱ صدر:", "تحليل الوقت لهذا الرد:", "انتظار النموذج/البوابة حتى أول حرف",
+                       "⇐ الحكم:", "ملخص التوقيت", "أطول فترات الانتظار بين الأوامر"):
+            self.assertIn(needle, text)
+
+
+class TimingAnalysisTests(unittest.TestCase):
+    def meta(self, tl, **kw):
+        return {"started_at": 1000.0, "ended_at": 1000.0 + tl[-1]["t"], "timeline": tl, "gateway_type": "omniroute",
+                "parts": [{"kind": "tool", "id": "a", "name": "Bash"}], **kw}
+
+    def test_slow_gateway_is_waiting_not_work(self):
+        tm = gui.analyze_timing(self.meta([
+            {"t": 0.5, "k": "gateway_ready"}, {"t": 0.6, "k": "launch"}, {"t": 2, "k": "init"},
+            {"t": 92, "k": "model_start"}, {"t": 95, "k": "first_token"},
+            {"t": 97, "k": "tool_call", "id": "a"}, {"t": 97.1, "k": "model_end", "chars": 40, "max_gap": 0.3},
+            {"t": 99, "k": "tool_done", "id": "a"}, {"t": 160, "k": "first_token"},
+            {"t": 165, "k": "model_end", "chars": 500, "max_gap": 0.2}, {"t": 165.5, "k": "result"},
+            {"t": 166, "k": "exit"}]))
+        self.assertAlmostEqual(tm["cats"]["model_wait"], 93 + 61, delta=0.5)
+        self.assertGreater(tm["pct"]["wait"], 80)
+        self.assertIn("OmniRoute", tm["verdict"])
+        self.assertEqual(sum("انتظر النموذج" in f["text"] for f in tm["flags"]), 2)
+
+    def test_long_command_is_work_and_approval_is_yours(self):
+        tm = gui.analyze_timing(self.meta([
+            {"t": 0.1, "k": "gateway_ready"}, {"t": 0.2, "k": "launch"}, {"t": 1, "k": "init"},
+            {"t": 2, "k": "model_start"}, {"t": 3, "k": "first_token"}, {"t": 4, "k": "tool_call", "id": "a"},
+            {"t": 4.1, "k": "model_end", "chars": 30, "max_gap": 0.1}, {"t": 304, "k": "tool_done", "id": "a"},
+            {"t": 306, "k": "first_token"}, {"t": 308, "k": "model_end", "chars": 100, "max_gap": 0.1},
+            {"t": 308.2, "k": "result"}], approvals=[{"t_ask": 1004.5, "t_done": 1034.5, "auto": False}]))
+        self.assertAlmostEqual(tm["cats"]["approval"], 30, delta=0.5)
+        self.assertAlmostEqual(tm["cats"]["tools"], 270, delta=0.5)
+        self.assertIn("تنفيذ أوامر فعلية", tm["verdict"])
+        self.assertTrue(any("وقت عمل فعلي" in f["text"] for f in tm["flags"]))
+        self.assertAlmostEqual(tm["tools"]["a"]["approval"], 30, delta=0.5)
+
+    def test_stall_in_the_middle_of_an_answer(self):
+        tm = gui.analyze_timing(self.meta([
+            {"t": 1, "k": "init"}, {"t": 2, "k": "first_token"},
+            {"t": 80, "k": "model_end", "chars": 300, "max_gap": 70}, {"t": 80.5, "k": "result"}]))
+        texts = " ".join(f["text"] for f in tm["flags"])
+        self.assertIn("توقف البث", texts)
+        self.assertIn("كتابة بطيئة", texts)
+
+    def test_old_messages_without_timing(self):
+        self.assertIsNone(gui.analyze_timing({"parts": []}))
+
 
 class DiagnoseTests(unittest.TestCase):
     def test_reasons_per_gateway(self):

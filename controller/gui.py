@@ -98,6 +98,169 @@ def _part_is_error(p: Dict[str, Any]) -> bool:
     return bool(p.get("is_error") or p.get("error"))
 
 
+# ------------------------------------------------------------ timing analysis
+WAIT_WARN = 45.0      # the model said nothing for this long before starting to answer
+SILENCE_WARN = 20.0   # a pause this long in the middle of a streamed answer
+LONG_TOOL = 120.0     # a command running this long is worth pointing out (it is still work)
+SLOW_CHARS = 8.0      # characters per second below this is a very slow model / provider
+
+TIME_CATS = [
+    ("gateway", "تشغيل البوابة قبل الإرسال", "wait"),
+    ("startup", "بدء Claude Code", "wait"),
+    ("model_wait", "انتظار النموذج/البوابة حتى أول حرف من الرد (بين الأوامر)", "wait"),
+    ("generation", "كتابة النموذج للرد أو الكود (عمل)", "work"),
+    ("tools", "تنفيذ الأوامر والأدوات (عمل)", "work"),
+    ("approval", "انتظار إذنك", "user"),
+    ("finishing", "إنهاء الجلسة", "wait"),
+]
+
+_GW_SLOW_HINT = {
+    "omniroute": "في OmniRoute قد يجرّب الـcombo عدة مزوّدين متتالين قبل أن يرد أحدها؛ راجع ترتيب المزوّدين ومهلة كل منهم في لوحة التحكم.",
+    "freellmapi": "في FreeLLMAPI قد يدوّر بين المفاتيح والمزوّدين بعد بلوغ حدود الطلبات؛ أضف مفاتيح أو اختر نموذجاً أسرع.",
+    "anthropic": "قد يكون ضغطاً مؤقتاً على خوادم Anthropic أو اقتراباً من حد الاستخدام.",
+}
+
+
+def _dur(sec: Optional[float]) -> str:
+    if sec is None:
+        return "—"
+    sec = max(0.0, float(sec))
+    if sec < 60:
+        return f"{sec:.1f}ث"
+    if sec < 3600:
+        return f"{int(sec // 60)}د {int(sec % 60):02d}ث"
+    return f"{int(sec // 3600)}س {int(sec % 3600 // 60):02d}د"
+
+
+def _clock(epoch: Optional[float]) -> str:
+    return time.strftime("%H:%M:%S", time.localtime(epoch)) if epoch else "—"
+
+
+def analyze_timing(meta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Split a reply's time into waiting (gateway/model) vs work (writing, running commands) vs you."""
+    tl = sorted(meta.get("timeline") or [], key=lambda e: e.get("t", 0))
+    t0 = meta.get("started_at")
+    if not tl or not t0:
+        return None
+    asks = [(a["t_ask"] - t0, a["t_done"] - t0) for a in meta.get("approvals") or []
+            if a.get("t_ask") and a.get("t_done") and not a.get("auto")]
+    cats: Dict[str, float] = {k: 0.0 for k, _, _ in TIME_CATS}
+    flags: List[Dict[str, Any]] = []
+    waits: List[Dict[str, Any]] = []
+    tools: Dict[str, Dict[str, Any]] = {}
+    names = {p.get("id"): p.get("name") for p in meta.get("parts") or [] if p.get("kind") == "tool"}
+
+    def add(cat: str, a: float, b: float) -> None:
+        if b <= a:
+            return
+        if cat == "tools":
+            ov = sum(max(0.0, min(b, y) - max(a, x)) for x, y in asks)
+            cats["approval"] += ov
+            cats["tools"] += (b - a) - ov
+        else:
+            cats[cat] += b - a
+
+    state, prev = "gateway", 0.0
+    anchor, anchor_label = 0.0, "بداية الطلب"
+    first_tok: Optional[float] = None
+    cycle_used = False
+    outstanding: set = set()
+    gen_chars, gen_time = 0, 0.0
+    for e in tl:
+        t, k = float(e.get("t", 0)), e.get("k")
+        add(state, prev, t)
+        prev = t
+        if k in ("gateway_ready", "launch"):
+            if k == "gateway_ready" and t > 20:
+                flags.append({"t": t, "text": f"تشغيل البوابة استغرق {_dur(t)} قبل إرسال الطلب."})
+            state = "startup"
+        elif k == "init":
+            state, anchor, anchor_label = "model_wait", t, "بدء الجلسة"
+            first_tok, cycle_used = None, False
+        elif k == "model_start":
+            if state not in ("generation",):
+                state = "model_wait"
+        elif k == "first_token":
+            first_tok = t
+            wait = t - anchor
+            waits.append({"t": t, "wait": wait, "after": anchor_label})
+            if wait > WAIT_WARN:
+                flags.append({"t": t, "text": f"انتظر النموذج {_dur(wait)} بعد {anchor_label} قبل أن يبدأ الرد — "
+                                              "بطء أو تعثر في البوابة/المزوّد، وليس عملاً."})
+            state = "generation"
+        elif k == "tool_call":
+            tid = e.get("id")
+            outstanding.add(tid)
+            info = {"t_call": t, "wait": None, "gen": None}
+            if not cycle_used:
+                if first_tok is not None:
+                    info["wait"], info["gen"] = first_tok - anchor, t - first_tok
+                else:  # no streaming data: waiting and writing cannot be separated
+                    info["wait"] = t - anchor
+                    waits.append({"t": t, "wait": t - anchor, "after": anchor_label})
+                cycle_used = True
+            tools[tid] = info
+            if state in ("finishing", "model_wait") and first_tok is not None:
+                state = "tools"
+        elif k == "model_end":
+            chars, gap = int(e.get("chars") or 0), float(e.get("max_gap") or 0)
+            if first_tok is not None and t > first_tok:
+                gen_chars += chars
+                gen_time += t - first_tok
+                speed = chars / (t - first_tok)
+                if chars > 200 and speed < SLOW_CHARS:
+                    flags.append({"t": t, "text": f"كتابة بطيئة جداً: {speed:.1f} حرف/ث — مزوّد أو نموذج بطيء."})
+            if gap > SILENCE_WARN:
+                flags.append({"t": t, "text": f"توقف البث {_dur(gap)} في منتصف كتابة الرد — اتصال متعثر أو مزوّد بطيء."})
+            state = "tools" if outstanding else "finishing"
+        elif k == "tool_done":
+            tid = e.get("id")
+            outstanding.discard(tid)
+            if tid in tools:
+                tools[tid]["t_done"] = t
+                dur = t - tools[tid]["t_call"]
+                tools[tid]["approval"] = sum(max(0.0, min(t, y) - max(tools[tid]["t_call"], x)) for x, y in asks)
+                if dur - tools[tid]["approval"] > LONG_TOOL:
+                    flags.append({"t": t, "text": f"الأمر {names.get(tid) or ''} استغرق {_dur(dur)} — هذا وقت عمل فعلي "
+                                                  f"{'(وانتهى بخطأ، ربما مهلة)' if e.get('error') else ''}".strip()})
+            if not outstanding:
+                state, anchor, first_tok, cycle_used = "model_wait", t, None, False
+                anchor_label = f"نتيجة {names.get(tid) or 'الأداة'}"
+        elif k in ("result", "exit"):
+            state = "finishing"
+    end = (meta["ended_at"] - t0) if meta.get("ended_at") else prev
+    add(state, prev, max(prev, end))
+    total = sum(cats.values())
+    groups = {"wait": 0.0, "work": 0.0, "user": 0.0}
+    for key, _, grp in TIME_CATS:
+        groups[grp] += cats[key]
+    pct = {g: (v / total * 100 if total else 0.0) for g, v in groups.items()}
+    gtype = meta.get("gateway_type") or ""
+    if total < 5:
+        verdict = "رد سريع؛ لا يوجد تأخير يُذكر."
+    elif pct["wait"] >= 50:
+        verdict = (f"معظم الوقت ({pct['wait']:.0f}%) انتظار للبوابة/النموذج بين الأوامر، وليس عملاً. "
+                   "التأخير من بطء المحادثة مع المزوّد. " + _GW_SLOW_HINT.get(gtype, "")).strip()
+    elif cats["tools"] / total >= 0.5:
+        verdict = f"معظم الوقت ({cats['tools'] / total * 100:.0f}%) تنفيذ أوامر فعلية؛ التأخير كان عملاً."
+    elif pct["work"] >= 50:
+        verdict = f"معظم الوقت ({pct['work']:.0f}%) عمل: كتابة النموذج للرد/الكود وتنفيذ الأوامر."
+    elif pct["user"] >= 30:
+        verdict = f"جزء كبير من الوقت ({pct['user']:.0f}%) انتظار إذنك؛ فعّل 🔓 الإذن المسبق لتجنبه."
+    else:
+        verdict = f"مختلط: عمل {pct['work']:.0f}% · انتظار البوابة/النموذج {pct['wait']:.0f}% · انتظار إذنك {pct['user']:.0f}%."
+    return {"cats": cats, "total": total, "groups": groups, "pct": pct, "flags": flags, "waits": waits,
+            "tools": tools, "verdict": verdict, "speed": (gen_chars / gen_time) if gen_time else None,
+            "t0": t0, "timeline": tl}
+
+
+def _text_end(tl: List[Dict[str, Any]], t: float) -> Optional[float]:
+    for e in tl:
+        if e.get("t", 0) >= t and e.get("k") in ("model_end", "tool_call", "result", "exit"):
+            return float(e["t"])
+    return None
+
+
 def build_report_text(conv: Dict[str, Any], messages: List[Dict[str, Any]], header: str,
                       project: Optional[Dict[str, Any]] = None) -> str:
     """A plain-text report of what was asked, every step Claude Code took, and every error."""
@@ -111,12 +274,23 @@ def build_report_text(conv: Dict[str, Any], messages: List[Dict[str, Any]], head
         if project.get("instructions"):
             out += ["تعليمات المشروع:", _clip(project["instructions"], 3000)]
     errors: List[str] = []
+    summary: List[str] = []
+    all_waits: List[Dict[str, Any]] = []
     turn = 0
+    last_end: Optional[float] = None
+    out += ["", "طريقة قراءة الأوقات: كل خطوة تذكر متى أُرسل الأمر ومتى اكتمل ومدته، وكم انتظر النموذج قبله.",
+            "«انتظار النموذج/البوابة» = لا شيء يحدث بانتظار رد المزوّد (بطء). «عمل» = كتابة الرد أو تنفيذ أمر."]
     for m in messages:
         meta = m.get("meta") or {}
         if m["role"] == "user":
             turn += 1
-            out += ["", "=" * 70, f"الدور {turn} — طلب المستخدم", "=" * 70, _clip(m.get("display") or "", 6000)]
+            out += ["", "=" * 70, f"الدور {turn} — طلب المستخدم", "=" * 70]
+            if m.get("created"):
+                line = f"⏱ أُرسل الطلب: {_clock(m['created'])}"
+                if meta.get("auto") and last_end:
+                    line += f" (بعد انتظار المتابعة التلقائية {_dur(m['created'] - last_end)})"
+                out.append(line)
+            out.append(_clip(m.get("display") or "", 6000))
             if meta.get("attachments"):
                 out.append("الملفات المرفقة: " + ", ".join(meta["attachments"]))
             if meta.get("expert"):
@@ -124,13 +298,37 @@ def build_report_text(conv: Dict[str, Any], messages: List[Dict[str, Any]], head
             continue
         who = meta.get("gateway_title") or meta.get("gateway") or "Claude"
         out += ["", f"--- رد Claude Code عبر {who}{(' · ' + meta['model']) if meta.get('model') else ''} ---"]
+        tm = analyze_timing(meta)
+        t0 = meta.get("started_at")
+        abs_ = (lambda rel: _clock(t0 + rel) if t0 is not None and rel is not None else "—")
+        if tm:
+            res = next((e["t"] for e in tm["timeline"] if e.get("k") == "result"), None)
+            out.append(f"⏱ بدأ: {_clock(t0)} · صدرت النتيجة النهائية: {abs_(res)} · "
+                       f"انتهى: {_clock(meta.get('ended_at'))} · المدة: {_dur(tm['total'])}")
+            last_end = meta.get("ended_at") or last_end
+        elif m.get("created"):
+            out.append(f"⏱ حُفظ: {_clock(m['created'])} (لا تتوفر تفاصيل توقيت لهذا الرد؛ سُجّل بإصدار أقدم)")
         step = 0
         for p in meta.get("parts") or [{"kind": "text", "text": m.get("display") or ""}]:
             if p.get("kind") == "tool":
                 step += 1
                 bad = _part_is_error(p)
-                out += [f"[الخطوة {step}] {'✘ فشلت' if bad else '✔'} الأداة: {p.get('name')}",
-                        "  المدخلات:", "  " + _clip(p.get("input"), 2500).replace("\n", "\n  ")]
+                out.append(f"[الخطوة {step}] {'✘ فشلت' if bad else '✔'} الأداة: {p.get('name')}")
+                if tm and p.get("t_call") is not None:
+                    info = tm["tools"].get(p.get("id")) or {}
+                    done = p.get("t_done")
+                    line = (f"  ⏱ أُرسل الأمر: {abs_(p['t_call'])} · اكتمل بالكامل: "
+                            f"{abs_(done) if done is not None else 'لم يكتمل'}"
+                            f"{' · مدة التنفيذ: ' + _dur(done - p['t_call']) if done is not None else ''}")
+                    if info.get("approval"):
+                        line += f" (منها انتظار إذنك {_dur(info['approval'])})"
+                    out.append(line)
+                    if info.get("wait") is not None:
+                        before = f"  ⏱ قبله: انتظار النموذج/البوابة {_dur(info['wait'])}"
+                        if info.get("gen") is not None:
+                            before += f" · كتابة النموذج للأمر {_dur(info['gen'])}"
+                        out.append(before)
+                out += ["  المدخلات:", "  " + _clip(p.get("input"), 2500).replace("\n", "\n  ")]
                 if p.get("result") is not None:
                     out += ["  النتيجة:", "  " + _clip(p.get("result"), 2500).replace("\n", "\n  ")]
                 if bad:
@@ -140,17 +338,49 @@ def build_report_text(conv: Dict[str, Any], messages: List[Dict[str, Any]], head
                     out += ["[خطأ]", _clip(p["text"], 3000)]
                     errors.append(f"الدور {turn}: " + _clip(p["text"], 600))
                 else:
-                    out += ["[نص الرد]", _clip(p["text"], 4000)]
+                    head = "[نص الرد]"
+                    if tm and p.get("t") is not None:
+                        end = _text_end(tm["timeline"], p["t"])
+                        head += f" ⏱ صدر: {abs_(p['t'])}" + (f" · اكتمل: {abs_(end)}" if end is not None else "")
+                    out += [head, _clip(p["text"], 4000)]
         for a in meta.get("approvals") or []:
             state = {"allow": "سُمح", "deny": "رُفض"}.get(a.get("behavior"), a.get("behavior"))
-            out.append(f"[إذن] {a.get('tool')}: {state}{' (إذن مسبق)' if a.get('auto') else ''}")
+            when = ""
+            if a.get("t_ask"):
+                when = f" ⏱ طُلب {_clock(a['t_ask'])}"
+                if a.get("t_done") and not a.get("auto"):
+                    when += f" · رُدّ {_clock(a['t_done'])} (انتظار {_dur(a['t_done'] - a['t_ask'])})"
+            out.append(f"[إذن] {a.get('tool')}: {state}{' (إذن مسبق)' if a.get('auto') else ''}{when}")
+        if tm:
+            out += ["", "  تحليل الوقت لهذا الرد:"]
+            for key, label, _ in TIME_CATS:
+                if tm["cats"][key] >= 0.05:
+                    out.append(f"   - {label}: {_dur(tm['cats'][key])} ({tm['cats'][key] / tm['total'] * 100 if tm['total'] else 0:.0f}%)")
+            if tm["waits"]:
+                ws = [w["wait"] for w in tm["waits"]]
+                out.append(f"   - مرات انتظار النموذج: {len(ws)} · المتوسط {_dur(sum(ws) / len(ws))} · الأطول {_dur(max(ws))}")
+            if tm["speed"]:
+                out.append(f"   - سرعة الكتابة: {tm['speed']:.0f} حرف/ث تقريباً")
+            for f_ in tm["flags"]:
+                out.append(f"   ⚠ {abs_(f_['t'])}: {f_['text']}")
+            out.append(f"   ⇐ الحكم: {tm['verdict']}")
+            summary.append(f"الدور {turn} ({_clock(t0)}): {_dur(tm['total'])} · عمل {tm['pct']['work']:.0f}% · "
+                           f"انتظار البوابة/النموذج {tm['pct']['wait']:.0f}% · إذنك {tm['pct']['user']:.0f}% — {tm['verdict']}")
+            for w in tm["waits"]:
+                all_waits.append({**w, "turn": turn, "clock": abs_(w["t"])})
         if meta.get("is_error") and not any(_part_is_error(p) for p in meta.get("parts") or []):
             errors.append(f"الدور {turn}: انتهى الرد بحالة خطأ.")
-        bits = [f"{meta['duration_ms'] / 1000:.1f} ث" if meta.get("duration_ms") else "",
+        bits = [f"المدة حسب Claude Code {meta['duration_ms'] / 1000:.1f} ث" if meta.get("duration_ms") else "",
                 f"{meta['num_turns']} دورات" if meta.get("num_turns") else "",
                 "أُوقف يدوياً" if meta.get("stopped") else ""]
         if any(bits):
             out.append("(" + " · ".join(b for b in bits if b) + ")")
+    if summary:
+        out += ["", "=" * 70, "ملخص التوقيت", "=" * 70] + summary
+        slow = sorted(all_waits, key=lambda w: -w["wait"])[:5]
+        if slow:
+            out += ["", "أطول فترات الانتظار بين الأوامر (لا عمل، بانتظار رد النموذج/البوابة):"]
+            out += [f"- {_dur(w['wait'])} عند {w['clock']} (الدور {w['turn']}، بعد {w['after']})" for w in slow]
     out += ["", "=" * 70, f"ملخص الأخطاء ({len(errors)})", "=" * 70]
     out += [f"{i}. {e}" for i, e in enumerate(errors, 1)] or ["لم تُسجَّل أخطاء صريحة؛ راجع الخطوات أعلاه."]
     return "\n".join(out) + "\n"
@@ -333,16 +563,48 @@ class StreamTranslator:
     """Turns Claude Code stream-json lines into the small event set the page understands,
     and collects the assistant message to store."""
 
-    def __init__(self):
+    def __init__(self, started: Optional[float] = None):
         self.deltas_in_message = False
         self.parts: List[Dict[str, Any]] = []
         self.session_id: Optional[str] = None
         self.result: Optional[Dict[str, Any]] = None
         self.model: Optional[str] = None
+        # timing: seconds since the request started, to tell real work from waiting
+        self.started = time.time() if started is None else started
+        self.timeline: List[Dict[str, Any]] = []
+        self._msg: Optional[Dict[str, Any]] = None  # the model message being streamed
+
+    def now(self) -> float:
+        return round(time.time() - self.started, 2)
+
+    def mark(self, kind: str, **extra: Any) -> float:
+        t = self.now()
+        self.timeline.append({"t": t, "k": kind, **extra})
+        return t
+
+    def _stream_tick(self, chars: int = 0, first: bool = False) -> None:
+        """Track a streamed chunk: first output time, size, and the longest silence inside the message."""
+        msg = self._msg
+        if msg is None:
+            return
+        t = self.now()
+        if first and msg.get("first") is None:
+            msg["first"] = t
+            self.mark("first_token")
+        msg["gap"] = max(msg.get("gap", 0.0), round(t - msg["last"], 2))
+        msg["last"] = t
+        msg["chars"] = msg.get("chars", 0) + chars
+
+    def _end_message(self) -> None:
+        msg = self._msg
+        if msg is None:
+            return
+        self._msg = None
+        self.mark("model_end", chars=msg.get("chars", 0), max_gap=msg.get("gap", 0.0))
 
     def _text_part(self) -> Dict[str, Any]:
         if not self.parts or self.parts[-1]["kind"] != "text" or self.parts[-1].get("closed"):
-            self.parts.append({"kind": "text", "text": ""})
+            self.parts.append({"kind": "text", "text": "", "t": self.now()})
         return self.parts[-1]
 
     def feed(self, evt: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -351,6 +613,7 @@ class StreamTranslator:
         if t == "system" and evt.get("subtype") == "init":
             self.session_id = evt.get("session_id") or self.session_id
             self.model = evt.get("model") or self.model
+            self.mark("init")
             out.append({"type": "init", "session_id": self.session_id, "model": self.model})
         elif t == "stream_event":
             if evt.get("parent_tool_use_id"):
@@ -359,13 +622,20 @@ class StreamTranslator:
             et = e.get("type")
             if et == "message_start":
                 self.deltas_in_message = False
+                self._end_message()
+                t = self.mark("model_start")
+                self._msg = {"start": t, "last": t, "first": None}
+            elif et == "message_stop":
+                self._end_message()
             elif et == "content_block_start" and (e.get("content_block") or {}).get("type") == "text":
                 if self.parts and self.parts[-1]["kind"] == "text":
                     self.parts[-1]["closed"] = True
-                self.parts.append({"kind": "text", "text": ""})
+                self.parts.append({"kind": "text", "text": "", "t": self.now()})
                 out.append({"type": "segment"})
             elif et == "content_block_delta":
                 d = e.get("delta") or {}
+                size = len(d.get("text") or d.get("thinking") or d.get("partial_json") or "")
+                self._stream_tick(size, first=bool(size))
                 if d.get("type") == "text_delta" and d.get("text"):
                     self.deltas_in_message = True
                     self._text_part()["text"] += d["text"]
@@ -380,13 +650,14 @@ class StreamTranslator:
                 if bt == "text" and not self.deltas_in_message and block.get("text"):
                     if self.parts and self.parts[-1]["kind"] == "text":
                         self.parts[-1]["closed"] = True
-                    self.parts.append({"kind": "text", "text": block["text"], "closed": True})
+                    self.parts.append({"kind": "text", "text": block["text"], "closed": True, "t": self.now()})
                     out.append({"type": "text", "text": block["text"]})
                 elif bt == "tool_use":
                     if self.parts and self.parts[-1]["kind"] == "text":
                         self.parts[-1]["closed"] = True
                     part = {"kind": "tool", "id": block.get("id"), "name": block.get("name"),
-                            "input": block.get("input"), "result": None, "is_error": False}
+                            "input": block.get("input"), "result": None, "is_error": False,
+                            "t_call": self.mark("tool_call", id=block.get("id"), name=block.get("name"))}
                     self.parts.append(part)
                     out.append({"type": "tool_use", "id": part["id"], "name": part["name"], "input": part["input"]})
         elif t == "user":
@@ -397,12 +668,17 @@ class StreamTranslator:
                 if block.get("type") != "tool_result":
                     continue
                 text = _flatten(block.get("content"))[:6000]
+                self._end_message()
+                t_done = self.mark("tool_done", id=block.get("tool_use_id"), error=bool(block.get("is_error")))
                 for part in self.parts:
                     if part["kind"] == "tool" and part["id"] == block.get("tool_use_id"):
                         part["result"], part["is_error"] = text, bool(block.get("is_error"))
+                        part["t_done"] = t_done
                 out.append({"type": "tool_result", "id": block.get("tool_use_id"), "content": text,
                             "is_error": bool(block.get("is_error"))})
         elif t == "result":
+            self._end_message()
+            self.mark("result")
             self.session_id = evt.get("session_id") or self.session_id
             self.result = {
                 "type": "result",
@@ -711,6 +987,7 @@ class GuiApp:
         run_id = secrets.token_hex(6)
         emit({"type": "start", "run_id": run_id, "conversation_id": conv_id, "sent": sent})
         base_meta = {"gateway": gw.name, "gateway_title": gw.title, "gateway_type": gw.type_name, "model": model or ""}
+        tr_ = StreamTranslator()  # its clock starts now: gateway start-up time counts too
         resume = conv["session_id"] if (conv["session_id"] and conv["session_gateway"] == gw.name and not force_new) else None
         try:
             if flows.bring_up(self.ctx, gw, False):
@@ -734,9 +1011,10 @@ class GuiApp:
         effort = str(req.get("effort") or "")
         effort = effort if effort in EFFORTS else ""
         allowed = list((self.ctx.cfg.get("tasks") or {}).get("allowed_tools") or [])
-        tr_ = StreamTranslator()
+        tr_.mark("gateway_ready")
         # The reply is stored right away and updated while it streams, so nothing is lost if Allinone
         # or the computer stops in the middle.
+        base_meta["started_at"] = tr_.started
         mid = store.add_message(conv_id, "assistant", "", meta={**base_meta, "running": True, "parts": tr_.parts})
         with self.lock:
             self.run_emit[run_id] = emit
@@ -754,6 +1032,7 @@ class GuiApp:
                                                            permission_mode=mode, allowed_tools=allowed,
                                                            effort=effort or None, approval=approval,
                                                            extra_args=self.run_extra_args(project_id))
+            tr_.mark("launch")
             with self.lock:
                 self.runs[run_id] = proc
                 self.run_gateways[run_id] = gw.name
@@ -783,9 +1062,11 @@ class GuiApp:
                             store.update_conversation(conv_id, session_id=tr_.session_id, session_gateway=gw.name,
                                                       gateway=gw.name, model=model or "")
                         if out["type"] in ("tool_result", "tool_use") or time.time() - last_save > 2:
-                            store.update_message(mid, tr_.final_text(), {**base_meta, "running": True, "parts": tr_.parts})
+                            store.update_message(mid, tr_.final_text(), {**base_meta, "running": True, "parts": tr_.parts,
+                                                                         "timeline": tr_.timeline})
                             last_save = time.time()
                 proc.wait()
+                tr_.mark("exit", code=proc.returncode)
             finally:
                 for pipe in (proc.stdout, proc.stderr):
                     try:
@@ -827,7 +1108,8 @@ class GuiApp:
                             subtype=str(tr_.result.get("subtype") or ""))
             if diag["reason"] == "session_missing":
                 store.update_conversation(conv_id, session_id=None, session_gateway=None)
-        meta = {**base_meta, "parts": tr_.parts, "running": False,
+        meta = {**base_meta, "parts": tr_.parts, "running": False, "timeline": tr_.timeline,
+                "ended_at": time.time(),
                 "model": model or tr_.model or gw.default_model(), "stopped": stopped, "approvals": approvals,
                 **{k: tr_.result.get(k) for k in ("cost_usd", "duration_ms", "num_turns", "is_error")}}
         if diag:
@@ -870,7 +1152,8 @@ class GuiApp:
             auto = conv is not None and conv in self.preapproved
             if emit is not None:
                 self.run_approvals.setdefault(run_id, []).append({"tool": tool_name, "behavior": "allow" if auto else "",
-                                                                  "auto": auto})
+                                                                  "auto": auto, "t_ask": time.time(),
+                                                                  "t_done": time.time() if auto else None})
             if emit is not None and auto:
                 emit({"type": "approval_auto", "tool": tool_name, "input": tool_input})
                 return {"behavior": "allow", "updatedInput": tool_input}
@@ -891,6 +1174,7 @@ class GuiApp:
             for rec in reversed(self.run_approvals.get(run_id, [])):
                 if rec["tool"] == tool_name and not rec["behavior"]:
                     rec["behavior"] = decision["behavior"]
+                    rec["t_done"] = time.time()
                     break
         return decision
 

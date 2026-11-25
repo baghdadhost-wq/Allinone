@@ -110,6 +110,20 @@ def stream(prompt, argv):
         else:
             emit({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "toolu_x",
                   "content": "This command requires approval", "is_error": True}]}})
+    if "TIMED" in prompt:
+        # A model that waits before answering, writes a command, the command runs, then a pause mid-answer.
+        wait_s, run_s = float(os.environ.get("FAKE_WAIT", "1.2")), float(os.environ.get("FAKE_RUN", "0.6"))
+        time.sleep(wait_s)
+        emit({"type": "stream_event", "event": {"type": "message_start", "message": {"id": "mt"}}})
+        emit({"type": "stream_event", "event": {"type": "content_block_delta", "index": 0,
+                                                "delta": {"type": "input_json_delta", "partial_json": '{"command":"npm i"}'}}})
+        emit({"type": "assistant", "message": {"id": "mt", "content": [
+            {"type": "tool_use", "id": "toolu_t", "name": "Bash", "input": {"command": "npm install"}}]}})
+        emit({"type": "stream_event", "event": {"type": "message_stop"}})
+        time.sleep(run_s)
+        emit({"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "toolu_t", "content": "added 12 packages", "is_error": False}]}})
+        time.sleep(wait_s)
     if "SLOW" in prompt:
         time.sleep(180)
     text = ask_gateway(prompt[-200:])
