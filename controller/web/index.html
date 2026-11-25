@@ -255,7 +255,7 @@ const I18N = {
     visRun:"التشغيل:", visShots:"{n} صورة", visReview:"👁 مراجعة {r}:", visRevOk:"✔ الصور سليمة", visRevBad:"✘ وجد مشاكل", visRevSkip:"لم تُراجع الصور بنموذج يرى الصور",
     projApp:"أمر تشغيل البرنامج (فارغ = اكتشاف تلقائي، مثل npm run dev)", projUrl:"رابط البرنامج (فارغ = يُقرأ من مخرجاته)", projKind:"نوع البرنامج",
     kindAuto:"تلقائي", kindWeb:"ويب", kindDesktop:"سطح مكتب", projSteps:"سيناريو التجربة (اختياري، خطوة في كل سطر)",
-    deep:"التفكير بعمق", showSent:"إظهار النص المرسل", hint:"Claude Code ينفّذ كل رسالة داخل مجلد المشروع · Enter للإرسال · Shift+Enter لسطر جديد",
+    deep:"التفكير بعمق", showSent:"إظهار ما يحدث فعلياً", showSentTip:"مفعّل: كل ما يحدث (النص المرسل كاملاً، الأدوات والأوامر ونتائجها، التحقق، التجربة الفعلية والصور، التنبيهات). غير مفعّل: الطلبات والأجوبة فقط", working:"⏳ يعمل الآن:", workingN:"{n} خطوة", hint:"Claude Code ينفّذ كل رسالة داخل مجلد المشروع · Enter للإرسال · Shift+Enter لسطر جديد",
     placeholder:"اكتب رسالتك…", welcome:"كيف أستطيع مساعدتك اليوم؟", welcomeSub:"اختر البوابة من الأعلى: OmniRoute أو FreeLLMAPI أو Claude — وClaude Code هو من ينفّذ في كل الحالات.",
     dashboard:"لوحة التحكم", login:"تسجيل الدخول", logout:"تسجيل الخروج", start:"تشغيل", stop:"إيقاف", running:"يعمل", stopped:"متوقف",
     notInstalled:"غير مثبت", loggedIn:"مسجّل الدخول", notLoggedIn:"غير مسجّل", project:"مجلد المشروع", projectAsk:"مسار مجلد المشروع (اتركه فارغاً لفتح نافذة الاختيار):",
@@ -297,7 +297,7 @@ const I18N = {
     visRun:"Run:", visShots:"{n} screenshots", visReview:"👁 Review by {r}:", visRevOk:"✔ screenshots look right", visRevBad:"✘ found problems", visRevSkip:"Screenshots were not reviewed by a model that sees",
     projApp:"Command to start the program (empty = detect, e.g. npm run dev)", projUrl:"Program URL (empty = read from its output)", projKind:"Program type",
     kindAuto:"Auto", kindWeb:"Web", kindDesktop:"Desktop", projSteps:"Test scenario (optional, one step per line)",
-    deep:"Deep thinking", showSent:"Show sent text", hint:"Claude Code runs every message in the project folder · Enter to send · Shift+Enter for a new line",
+    deep:"Deep thinking", showSent:"Show what actually happens", showSentTip:"On: everything (full sent text, tools and commands with results, checks, real tests and screenshots, notices). Off: only requests and answers", working:"⏳ Working:", workingN:"{n} steps", hint:"Claude Code runs every message in the project folder · Enter to send · Shift+Enter for a new line",
     placeholder:"Write your message…", welcome:"How can I help you today?", welcomeSub:"Pick the gateway at the top: OmniRoute, FreeLLMAPI or Claude — Claude Code does the work in every case.",
     dashboard:"Dashboard", login:"Sign in", logout:"Sign out", start:"Start", stop:"Stop", running:"running", stopped:"stopped",
     notInstalled:"not installed", loggedIn:"signed in", notLoggedIn:"not signed in", project:"Project folder", projectAsk:"Project folder path (leave empty to open a folder picker):",
@@ -388,7 +388,7 @@ function applyLang(){
   document.querySelectorAll("[data-i]").forEach(e=>e.textContent=t(e.dataset.i));
   $("#newChat").textContent=t("newChat"); $("#search").placeholder=t("search"); $("#input").placeholder=t("placeholder");
   $("#langBtn").textContent = S.lang==="ar"?"EN":"ع"; $("#attachBtn").title=t("attach"); $("#quitBtn").textContent=t("quit");
-  $("#tVerify").title=t("verifyTip"); $("#tVisual").title=t("visualTip"); renderVisualToggle(); $("#answerBtn").title=t("answerTip"); $("#answerBtn").textContent="📥 "+t("answer"); $("#reportBtn").textContent=t("report"); $("#reportBtn").title=t("reportTip"); $("#preBtn").title=t("preTip");
+  $("#tSent").title=t("showSentTip"); $("#tVerify").title=t("verifyTip"); $("#tVisual").title=t("visualTip"); renderVisualToggle(); $("#answerBtn").title=t("answerTip"); $("#answerBtn").textContent="📥 "+t("answer"); $("#reportBtn").textContent=t("report"); $("#reportBtn").title=t("reportTip"); $("#preBtn").title=t("preTip");
   $("#newChat").textContent = S.tab==="projects" ? t("newProject") : t("newChat");
   fillSelects(); renderPills(); renderPre(); renderProjChip(); S.view==="project" ? renderProjectView() : renderThread();
 }
@@ -410,7 +410,7 @@ $("#perm").onchange = e=>LS.set("perm", e.target.value);
 for(const [id, key] of [["visual","visual"],["verify","verify"],["deep","deep"],["memory","memory"],["showSent","showSent"]]){
   const box = $("#"+id); box.checked = LS.get(key, key==="verify" || key==="visual");
   const lab = box.closest(".toggle"); lab.classList.toggle("on", box.checked);
-  box.onchange = ()=>{ LS.set(key, box.checked); lab.classList.toggle("on", box.checked); if(key==="showSent") renderThread(); };
+  box.onchange = ()=>{ LS.set(key, box.checked); lab.classList.toggle("on", box.checked); if(key==="showSent"){ renderThread(); if(S.running) drawRun(S.running); } };
 }
 
 /* ---------- gateways ---------- */
@@ -693,8 +693,10 @@ $("#answerFile").onchange = async e=>{
 
 /* ---------- rendering ---------- */
 function banner(text, isErr){ const b = $("#banner"); if(!text){ b.classList.remove("show"); return; } b.textContent = text; b.classList.add("show"); b.style.borderColor = isErr?"var(--err)":""; }
+function SHOWALL(){ return $("#showSent").checked; }
 function userHTML(m){
-  const meta = m.meta||{}; const showSent = $("#showSent").checked && m.sent && m.sent!==m.display;
+  const meta = m.meta||{}; const showSent = SHOWALL() && m.sent && m.sent!==m.display;
+  if(!SHOWALL() && meta.auto) return "";  // automatic continuations are part of "what happens"
   const badges = [meta.deep?t("deepBadge"):"", meta.memory?t("memBadge"):"", (meta.attachments||[]).length?("📎 "+meta.attachments.length+" "+t("files")):"", meta.expert?t("expertBadge"):""].filter(Boolean);
   return `<div class="msg user"><div class="bubble" dir="auto">${showSent?`<span class="sent-label">${esc(t("sentFull"))}</span>`+esc(m.sent):esc(m.display)}${badges.length?`<div class="badges">${badges.map(b=>`<span class="badge">${esc(b)}</span>`).join("")}</div>`:""}</div></div>`;
 }
@@ -727,7 +729,7 @@ function visualHTML(v){
   const note = v.skipped||v.error ? `<div class="vn" dir="auto">${esc(v.skipped||v.error)}</div>` : "";
   const rv = v.review; let review = "";
   if(rv){ review = `<div class="vn" dir="auto">${esc(fmt(t("visReview"),{r:rv.reviewer||"—"}))} ${esc(rv.verdict==="ok"?t("visRevOk"):rv.verdict==="problems"?t("visRevBad"):(rv.text||t("visRevSkip")).slice(0,200))}</div>`; }
-  const shots = (v.shots||[]).length ? `<div class="shots">${v.shots.map(s=>`<figure data-shot="${esc(s.path)}" data-cap="${esc(s.name+" · "+(s.url||""))}"><img loading="lazy" src="${imgURL(s.path)}" alt=""><figcaption>${esc(s.name)}</figcaption></figure>`).join("")}</div>` : "";
+  const shots = (v.shots||[]).length ? `<div class="shots">${v.shots.map(s=>`<figure data-shot="${esc(s.path)}" data-cap="${esc(s.name+" · "+(s.url||""))}"><img loading="lazy" src="${imgURL(s.path)}" alt=""><figcaption>${esc(s.name)}${s.tokens?` · ≈${s.tokens} tok`:""}</figcaption></figure>`).join("")}</div>` : "";
   return `<div class="vis ${state}"><div class="vh">${esc(head)}</div>${run}${probs}${review}${note}${shots}</div>`;
 }
 function openShot(path, cap){
@@ -766,7 +768,13 @@ function interruptHTML(meta){
 }
 function assistantHTML(m, isLast){
   const meta = m.meta||{}; const parts = meta.parts || [{kind:"text", text:m.display}];
-  const body = parts.map(p=>p.kind==="tool"?toolHTML(p):(p.error?`<div class="err">${esc(p.text)}</div>`:md(p.text))).join("");
+  const all = SHOWALL();
+  const body = parts.filter(p=>all || p.kind!=="tool").map(p=>p.kind==="tool"?toolHTML(p):(p.error?`<div class="err">${esc(p.text)}</div>`:md(p.text))).join("");
+  if(!all){  // only the answer
+    const intrQ = (isLast && meta.interrupted && !S.running) ? interruptHTML(meta) : "";
+    if(!body && !intrQ) return "";
+    return `<div class="msg assistant" data-text="${esc(m.display)}"><div class="body">${body}</div>${metaHTML(meta)}${intrQ}</div>`;
+  }
   const auto = (meta.approvals||[]).filter(a=>a.auto).map(a=>`<div class="notice">${esc(fmt(t("preAuto"),{t:a.tool}))}</div>`).join("");
   const intr = (isLast && meta.interrupted && !S.running) ? interruptHTML(meta) : "";
   const v = meta.verify; let ver = "";
@@ -915,8 +923,13 @@ let drawPending = false;
 function drawRun(run){
   if(drawPending) return; drawPending = true;
   requestAnimationFrame(()=>{ drawPending = false;
-    run.body.innerHTML = run.parts.map(p=> p.kind==="tool"?toolHTML(p) : p.kind==="approval"?approvalHTML(p) : p.kind==="wait"?waitHTML(p) : p.kind==="visual"?visualHTML(p.entry) : p.kind==="thinking"?`<div class="thinking">${esc(p.text)}</div>`
-      : p.kind==="notice"?`<div class="notice">${esc(p.text)}</div>` : p.kind==="error"?`<div class="err">${esc(p.text)}</div>` : md(p.text)).join("")
+    const all = SHOWALL();
+    const shown = all ? run.parts : run.parts.filter(p=>["text","approval","wait","error"].includes(p.kind));
+    const tools = run.parts.filter(p=>p.kind==="tool");
+    const lastTool = tools[tools.length-1];
+    const activity = (!all && S.running===run && lastTool) ? `<div class="notice" dir="auto">${esc(t("working"))} ${esc(lastTool.name||"")} <span dir="ltr">${esc(String((lastTool.input&&(lastTool.input.command||lastTool.input.file_path||lastTool.input.url))||"").slice(0,70))}</span> · ${esc(fmt(t("workingN"),{n:tools.length}))}</div>` : "";
+    run.body.innerHTML = activity + shown.map(p=> p.kind==="tool"?toolHTML(p) : p.kind==="approval"?approvalHTML(p) : p.kind==="wait"?waitHTML(p) : p.kind==="visual"?visualHTML(p.entry) : p.kind==="thinking"?`<div class="thinking">${esc(p.text)}</div>`
+      : p.kind==="notice"?`<div class="notice">${esc(p.text)}</div>` : p.kind==="error"?`<div class="err">${esc(p.text)}</div>` : md(p.text||"")).join("")
       + (S.running===run?'<p class="cursor"></p>':"");
     wire(run.body);
     run.body.querySelectorAll("[data-waitcancel]").forEach(b=>b.onclick=()=>stopRun());

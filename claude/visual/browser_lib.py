@@ -140,28 +140,96 @@ def detect_app(cwd: Path, python: str = "") -> Optional[Dict[str, str]]:
     return None
 
 
+# ------------------------------------------------------------------ light pictures
+# A model reading an image pays for its pixels (about width × height / 750 tokens), not for the file
+# size. So pictures are taken at a reduced scale (0.75 → 960×600 ≈ 770 tokens instead of 1280×800 ≈ 1370),
+# of the visible window rather than the whole long page, and saved as JPEG (smaller files to keep).
+def shot_scale(cfg: Dict[str, Any]) -> float:
+    try:
+        return min(2.0, max(0.3, float(cfg.get("shot_scale") or 0.75)))
+    except (TypeError, ValueError):
+        return 0.75
+
+
+def take_shot(page, path: Path, cfg: Dict[str, Any], full: Optional[bool] = None) -> None:
+    full = bool(cfg.get("full_page", False)) if full is None else full
+    kwargs: Dict[str, Any] = {"path": str(path), "full_page": full}
+    if path.suffix.lower() in (".jpg", ".jpeg"):
+        kwargs.update(type="jpeg", quality=int(cfg.get("jpeg_quality") or 60))
+    if full:  # a very long page would be a huge picture: keep at most 3 screens
+        vp = page.viewport_size or {"width": 1280, "height": 800}
+        try:
+            height = int(page.evaluate("document.documentElement.scrollHeight"))
+        except Exception:
+            height = vp["height"]
+        if height > vp["height"] * 3:
+            kwargs.pop("full_page")
+            kwargs["clip"] = {"x": 0, "y": 0, "width": vp["width"], "height": vp["height"] * 3}
+            kwargs["full_page"] = True
+    page.screenshot(**kwargs)
+
+
+def tokens_estimate(path: Path) -> int:
+    """≈ tokens a model pays to look at this picture (PNG or JPEG), read from the file header."""
+    import struct
+    try:
+        data = path.read_bytes()[:65536]
+        if data[:8] == b"\x89PNG\r\n\x1a\n":
+            w, h = struct.unpack(">II", data[16:24])
+        else:
+            i, w, h = 2, 0, 0
+            while i < len(data) - 9:
+                marker, size = data[i + 1], struct.unpack(">H", data[i + 2:i + 4])[0]
+                if marker in (0xC0, 0xC1, 0xC2):
+                    h, w = struct.unpack(">HH", data[i + 5:i + 9])
+                    break
+                i += 2 + size
+        w, h = int(w), int(h)
+        if max(w, h) > 1568:  # the model shrinks bigger pictures to this first
+            f = 1568 / max(w, h)
+            w, h = int(w * f), int(h * f)
+        return w * h // 750
+    except (OSError, ValueError, IndexError):
+        return 0
+
+
 # ------------------------------------------------------------------ the screen
-def capture_screen(path: Path) -> Optional[str]:
-    """A screenshot of the whole screen, with what the system already has. Returns an error or None."""
+def capture_screen(path: Path, max_width: int = 1000) -> Optional[str]:
+    """A screenshot of the whole screen, shrunk to max_width, with what the system already has."""
     path.parent.mkdir(parents=True, exist_ok=True)
+    jpeg = path.suffix.lower() in (".jpg", ".jpeg")
     try:
         if IS_WINDOWS:
+            fmt = "Jpeg" if jpeg else "Png"
             ps = ("Add-Type -AssemblyName System.Windows.Forms,System.Drawing;"
                   "$b=[System.Windows.Forms.SystemInformation]::VirtualScreen;"
                   "$i=New-Object System.Drawing.Bitmap $b.Width,$b.Height;"
                   "$g=[System.Drawing.Graphics]::FromImage($i);"
                   "$g.CopyFromScreen($b.Left,$b.Top,0,0,$i.Size);"
-                  f"$i.Save('{path}',[System.Drawing.Imaging.ImageFormat]::Png)")
+                  f"$w=[Math]::Min({max_width},$b.Width);$h=[int]($b.Height*$w/$b.Width);"
+                  "$s=New-Object System.Drawing.Bitmap $i,$w,$h;"
+                  f"$s.Save('{path}',[System.Drawing.Imaging.ImageFormat]::{fmt})")
             subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, timeout=30)
         elif sys.platform == "darwin":
-            subprocess.run(["screencapture", "-x", str(path)], capture_output=True, timeout=30)
+            subprocess.run(["screencapture", "-x", "-t", "jpg" if jpeg else "png", str(path)], capture_output=True, timeout=30)
+            if path.is_file():
+                subprocess.run(["sips", "-Z", str(max_width), str(path)], capture_output=True, timeout=30)
         else:
-            for cmd in (["gnome-screenshot", "-f", str(path)], ["grim", str(path)], ["scrot", "-o", str(path)],
-                        ["import", "-window", "root", str(path)], ["spectacle", "-b", "-n", "-o", str(path)]):
+            raw = path.with_suffix(".raw.png")
+            for cmd in (["gnome-screenshot", "-f", str(raw)], ["grim", str(raw)], ["scrot", "-o", str(raw)],
+                        ["import", "-window", "root", str(raw)], ["spectacle", "-b", "-n", "-o", str(raw)]):
                 if shutil.which(cmd[0]):
                     subprocess.run(cmd, capture_output=True, timeout=30)
-                    if path.is_file():
+                    if raw.is_file():
                         break
+            if raw.is_file():
+                if shutil.which("convert"):
+                    subprocess.run(["convert", str(raw), "-resize", f"{max_width}x>", "-quality", "60", str(path)],
+                                   capture_output=True, timeout=30)
+                if not path.is_file():
+                    raw.replace(path.with_suffix(".png"))
+                    path = path.with_suffix(".png")
+                raw.unlink(missing_ok=True)
     except (OSError, subprocess.SubprocessError) as exc:
         return str(exc)
     return None if path.is_file() else "لا توجد أداة لالتقاط الشاشة على هذا النظام"

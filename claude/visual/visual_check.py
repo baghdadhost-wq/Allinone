@@ -47,8 +47,8 @@ class Run:
         self.problems: List[str] = []
         self.notes: List[str] = []
 
-    def shot_path(self, name: str) -> Path:
-        return self.out / f"{len(self.shots) + 1:02d}-{_safe(name)}.png"
+    def shot_path(self, name: str, ext: str = "jpg") -> Path:
+        return self.out / f"{len(self.shots) + 1:02d}-{_safe(name)}.{ext}"
 
     # --------------------------------------------------------------- desktop
     def desktop(self, app: "bl.App") -> None:
@@ -59,7 +59,7 @@ class Run:
                 self.problems.append(f"البرنامج أُغلق بعد التشغيل (رمز الخروج {app.proc.returncode}). آخر مخرجاته:\n{app.tail(25)}")
                 break
             path = self.shot_path(label)
-            err = bl.capture_screen(path)
+            err = bl.capture_screen(path, max_width=int(self.cfg.get("screen_width") or 1000))
             if err:
                 self.notes.append(f"تعذّر التقاط الشاشة: {err}")
                 break
@@ -73,7 +73,9 @@ class Run:
         with sync_playwright() as pw:
             browser = bl.launch(pw, self.cfg.get("browser") or "")
             try:
-                ctx = browser.new_context(viewport={"width": 1280, "height": 800}, ignore_https_errors=True)
+                # Small pictures: what a model pays for is the number of pixels (≈ width×height/750 tokens)
+                ctx = browser.new_context(viewport={"width": 1280, "height": 800}, ignore_https_errors=True,
+                                          device_scale_factor=bl.shot_scale(self.cfg))
                 page = ctx.new_page()
                 page.set_default_timeout(float(self.cfg.get("step_timeout") or 10) * 1000)
                 watch = bl.PageWatch(page, url)
@@ -107,12 +109,12 @@ class Run:
         snap = bl.snapshot(page)
         path = self.shot_path(name)
         try:
-            page.screenshot(path=str(path), full_page=True)
+            bl.take_shot(page, path, self.cfg)
         except Exception as exc:
             self.notes.append(f"تعذّرت الصورة {name}: {exc}")
             return snap
         self.shots.append({"name": name, "path": str(path), "title": snap.get("title") or "", "url": snap.get("url") or "",
-                           "text": (snap.get("text") or "")[:400]})
+                           "text": (snap.get("text") or "")[:400], "tokens": bl.tokens_estimate(path)})
         if bl.is_blank(snap):
             self.problems.append(f"الصفحة فارغة تماماً في مرحلة «{name}» ({snap.get('url')}).")
         return snap

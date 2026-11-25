@@ -678,6 +678,9 @@ class GuiServerTests(unittest.TestCase):
         self.assertTrue(any(n.startswith("page-") for n in names))  # visited a link by itself
         for shot in first["shots"]:
             self.assertTrue(Path(shot["path"]).is_file())
+            self.assertTrue(shot["path"].endswith(".jpg"))
+        start = next(s for s in first["shots"] if s["name"] == "start")
+        self.assertLess(start["tokens"], 900)                        # 960×600 ≈ 770 tokens, not 1280×800+
         self.assertEqual(len(self.of(ev, "visual")), 2)               # the page sees each try live
         self.assertIn("allinone_browser", rec["mcp"]["mcpServers"])    # browser tools for the model
         self.assertEqual(rec["mcp"]["mcpServers"]["allinone_browser"]["env"]["ALLINONE_BROWSER_IMAGES"], "0")
@@ -709,7 +712,7 @@ class GuiServerTests(unittest.TestCase):
         review_prompt = Path(os.environ.get("FAKE_CLAUDE_RECORD") or self.sb.env["FAKE_CLAUDE_RECORD"]).with_name(
             Path(self.sb.env["FAKE_CLAUDE_RECORD"]).name + ".review.txt").read_text(encoding="utf-8")
         self.assertIn("REVIEW_FAIL", review_prompt)                   # the reviewer knows what was asked
-        self.assertIn("01-start.png", review_prompt)
+        self.assertIn("01-start.jpg", review_prompt)
         self.assertEqual(self.of(ev, "saved")[0]["meta"]["verify"]["visual_status"], "failed")
 
     def test_visual_not_installed_is_explained(self):
@@ -809,7 +812,7 @@ class VisualPieces(unittest.TestCase):
             self.assertIn("قهوة", text(4))                              # clicking showed the result
             shot = replies[5]["result"]["content"]
             self.assertEqual(shot[1]["type"], "image")                   # models that see get the picture
-            self.assertTrue(list((Path(tmp) / "shots").glob("*.png")))
+            self.assertTrue(list((Path(tmp) / "shots").glob("*.jpg")))
             self.assertIn("boom", text(6))                              # console errors are reported
 
 

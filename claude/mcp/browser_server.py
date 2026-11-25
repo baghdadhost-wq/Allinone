@@ -37,6 +37,7 @@ import browser_lib as bl  # noqa: E402
 OUT = Path(os.environ.get("ALLINONE_VISUAL_OUT") or (HERE.parent.parent / "data" / "visual" / "manual"))
 BROWSER = os.environ.get("ALLINONE_BROWSER", "")
 SEND_IMAGES = os.environ.get("ALLINONE_BROWSER_IMAGES", "1") == "1"
+CFG = {"shot_scale": os.environ.get("ALLINONE_SHOT_SCALE") or 0.75, "jpeg_quality": os.environ.get("ALLINONE_JPEG_QUALITY") or 60}
 
 _state = {"pw": None, "browser": None, "page": None, "watch": None, "n": 0}
 
@@ -46,7 +47,8 @@ def _page():
         from playwright.sync_api import sync_playwright
         _state["pw"] = sync_playwright().start()
         _state["browser"] = bl.launch(_state["pw"], BROWSER)
-        ctx = _state["browser"].new_context(viewport={"width": 1280, "height": 800}, ignore_https_errors=True)
+        ctx = _state["browser"].new_context(viewport={"width": 1280, "height": 800}, ignore_https_errors=True,
+                                            device_scale_factor=bl.shot_scale(CFG))
         _state["page"] = ctx.new_page()
         _state["page"].set_default_timeout(15000)
         _state["watch"] = bl.PageWatch(_state["page"])
@@ -60,19 +62,22 @@ def _settle(page) -> None:
         pass
 
 
-def _shot(name: str, full: bool = True, screen: bool = False):
+def _shot(name: str, full: bool = False, screen: bool = False):
     _state["n"] += 1
-    path = OUT / f"{_state['n']:02d}-{re.sub(r'[^\w-]+', '-', name or 'shot', flags=re.U)[:40]}.png"
+    path = OUT / f"{_state['n']:02d}-{re.sub(r'[^\w-]+', '-', name or 'shot', flags=re.U)[:40]}.jpg"
     OUT.mkdir(parents=True, exist_ok=True)
     if screen:
-        err = bl.capture_screen(path)
+        err = bl.capture_screen(path, max_width=int(float(CFG["shot_scale"]) * 1280))
         if err:
             raise RuntimeError(err)
+        path = path if path.is_file() else path.with_suffix(".png")
     else:
-        _page().screenshot(path=str(path), full_page=full)
-    content = [{"type": "text", "text": f"حُفظت الصورة: {path}"}]
+        bl.take_shot(_page(), path, CFG, full=full)
+    cost = bl.tokens_estimate(path)
+    content = [{"type": "text", "text": f"حُفظت الصورة: {path} (≈{cost} توكن عند قراءتها)"}]
     if SEND_IMAGES and path.stat().st_size < 4_500_000:
-        content.append({"type": "image", "data": base64.b64encode(path.read_bytes()).decode(), "mimeType": "image/png"})
+        mime = "image/jpeg" if path.suffix.lower() == ".jpg" else "image/png"
+        content.append({"type": "image", "data": base64.b64encode(path.read_bytes()).decode(), "mimeType": mime})
     return {"_content": content}
 
 
@@ -149,8 +154,9 @@ def browser_press(key: str) -> str:
 
 
 @tool
-def browser_screenshot(name: str = "", full: bool = True):
-    """Take a screenshot of the page now (full page by default). Take one at each stage you test.
+def browser_screenshot(name: str = "", full: bool = False):
+    """Take a screenshot of what is visible now (full=true for the whole page, up to 3 screens; costs more).
+    Take one at each stage you test. Pictures are small to keep reading them cheap.
     The file path is returned; models that can see images also receive the picture."""
     _page()
     _settle(_state["page"])

@@ -1503,7 +1503,9 @@ class GuiApp:
                 "model_sees_images": cfg.get("model_sees_images", "auto"),
                 "reviewer_gateway": str(rev.get("gateway", "auto") if isinstance(rev, dict) else rev),
                 "reviewer_model": str(rev.get("model", "") if isinstance(rev, dict) else ""),
-                "review_timeout": float(cfg.get("review_timeout", 360))}
+                "review_timeout": float(cfg.get("review_timeout", 360)),
+                "shot_scale": float(cfg.get("shot_scale", 0.75)), "jpeg_quality": int(cfg.get("jpeg_quality", 60)),
+                "full_page": bool(cfg.get("full_page", False))}
 
     def visual_status(self) -> Dict[str, Any]:
         st = dict(getattr(self, "_visual_job", None) or {})
@@ -1546,7 +1548,9 @@ class GuiApp:
                 "kind": (proj["app_kind"] if proj is not None and proj["app_kind"] else "auto"),
                 "steps": proj["visual_steps"] if proj is not None else "",
                 "browser": vis.browser_path(self.ctx), "start_timeout": cfg["start_timeout"],
-                "max_pages": cfg["max_pages"], "mobile": cfg["mobile"], "python": self.ctx.python}
+                "max_pages": cfg["max_pages"], "mobile": cfg["mobile"], "python": self.ctx.python,
+                "shot_scale": cfg["shot_scale"], "jpeg_quality": cfg["jpeg_quality"], "full_page": cfg["full_page"],
+                "screen_width": int(1280 * cfg["shot_scale"])}
         (out / "base-config.json").write_text(json.dumps(base, ensure_ascii=False), encoding="utf-8")
         return {"ALLINONE_VISUAL": "1", "ALLINONE_VISUAL_PYTHON": py, "ALLINONE_VISUAL_CONFIG": str(out / "base-config.json"),
                 "ALLINONE_VISUAL_OUT": str(out), "ALLINONE_REVIEW_URL": self.base_url() + "/internal/review?t=" + self.token,
@@ -1569,6 +1573,8 @@ class GuiApp:
             "env": {"ALLINONE_VISUAL_OUT": str(self.ctx.data_dir / "visual" / run_id / "model"),
                     "ALLINONE_BROWSER": vis.browser_path(self.ctx),
                     "ALLINONE_BROWSER_IMAGES": "1" if self.model_sees_images(gw) else "0",
+                    "ALLINONE_SHOT_SCALE": str(self.visual_cfg()["shot_scale"]),
+                    "ALLINONE_JPEG_QUALITY": str(self.visual_cfg()["jpeg_quality"]),
                     "PYTHONIOENCODING": "utf-8"}}}
 
     def reviewer_gateway(self, run_id: str):
