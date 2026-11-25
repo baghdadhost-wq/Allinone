@@ -150,6 +150,83 @@ class GuiServerTests(unittest.TestCase):
         self.assertNotIn("--resume", rec["argv"])
         self.assertTrue(rec["env"]["CLAUDE_CONFIG_DIR"].endswith("claude-home"))
 
+    def test_several_claude_accounts(self):
+        os.environ["FAKE_AUTH"] = "1"
+        self.addCleanup(lambda: os.environ.pop("FAKE_AUTH", None))
+        res = json.loads(self.call("/api/accounts", {"action": "add", "name": "Work Pro"})[1])
+        acc = res["id"]
+        self.assertEqual(acc, "work-pro")
+        self.assertEqual([a["id"] for a in res["accounts"]], ["default", "work-pro"])
+        ev = self.chat(text="build it", gateway="claude", account=acc)
+        conv_id = self.of(ev, "conversation")[0]["id"]
+        rec = self.sb.read_record()
+        self.assertTrue(rec["env"]["CLAUDE_CONFIG_DIR"].endswith(str(Path("claude-accounts") / acc)))  # its own sign-in
+        self.assertEqual(self.ctx.store().conversation(conv_id)["session_gateway"], f"claude#{acc}")
+        self.assertEqual(self.of(ev, "saved")[0]["meta"]["account"], acc)
+        self.chat(text="more", gateway="claude", account=acc, conversation_id=conv_id)
+        self.assertIn("--resume", self.sb.read_record()["argv"])          # same account: same session
+        ev = self.chat(text="continue on the main account", gateway="claude", account="default", conversation_id=conv_id)
+        rec = self.sb.read_record()
+        self.assertNotIn("--resume", rec["argv"])                         # another account: new session…
+        self.assertIn("ملف تسليم المهمة", rec["prompt"])                  # …with the work so far
+        self.assertIn("build it", rec["prompt"])
+        self.assertTrue(rec["env"]["CLAUDE_CONFIG_DIR"].endswith("claude-home"))
+        st = json.loads(self.call(f"/api/auth?account={acc}")[1])
+        self.assertEqual(st["account"], acc)
+        self.call("/api/accounts", {"action": "remove", "id": acc})
+        self.assertEqual([a["id"] for a in json.loads(self.call("/api/accounts")[1])["accounts"]], ["default"])
+        self.assertEqual(self.call("/api/accounts", {"action": "remove", "id": "default"})[0], 400)
+
+    def test_claude_ai_by_hand(self):
+        proj = self.sb.tmp / "web-proj"
+        (proj / "src").mkdir(parents=True)
+        (proj / "src" / "app.py").write_text("print('v1')\n", encoding="utf-8")
+        (proj / "README.md").write_text("# shop\n", encoding="utf-8")
+        (proj / "node_modules" / "x").mkdir(parents=True)
+        (proj / "node_modules" / "x" / "big.js").write_text("junk", encoding="utf-8")
+        status, raw = self.call("/api/bridge/prepare", {"text": "fix app.py to print v2", "project": str(proj)})
+        self.assertEqual(status, 200, raw)
+        r = json.loads(raw)
+        pkg = r["package"]
+        conv_id = r["conversation_id"]
+        self.assertIn("<<<FILE: المسار/النسبي/للملف.ext>>>", pkg)         # Claude is told how to answer
+        self.assertIn("<<<FILE: src/app.py>>>\nprint('v1')", pkg)       # the file it needs
+        self.assertIn("src/app.py", r["files"])
+        self.assertNotIn("node_modules", pkg)
+        self.assertTrue(pkg.rstrip().endswith("fix app.py to print v2"))
+        self.assertTrue(Path(r["file"]).is_file())
+        answer = ("سأعدّل الملف.\n<<<FILE: src/app.py>>>\n```python\nprint('v2')\n```\n<<<END FILE>>>\n"
+                  "<<<FILE: src/util.py>>>\nX = 1\n<<<END FILE>>>\n<<<FILE: ../evil.py>>>\nboom\n<<<END FILE>>>\n"
+                  "<<<DELETE: README.md>>>\n<<<RUN: python src/app.py>>>\nجرّبه.")
+        prev = json.loads(self.call("/api/bridge/preview", {"conversation_id": conv_id, "answer": answer})[1])
+        actions = {x["path"]: x["action"] for x in prev["plan"]}
+        self.assertEqual(actions, {"src/app.py": "modify", "src/util.py": "create", "../evil.py": "rejected",
+                                   "README.md": "delete"})
+        self.assertEqual(prev["runs"], ["python src/app.py"])
+        self.app.ctx.cfg.data.setdefault("gui", {})["verify"] = {"command": 'python3 -c "import sys; sys.exit(3)"',
+                                                                 "auto_detect": False}
+        res = json.loads(self.call("/api/bridge/apply", {"conversation_id": conv_id, "answer": answer, "verify": True,
+                                                         "paths": ["src/app.py", "src/util.py", "../evil.py"]})[1])
+        self.assertEqual((proj / "src" / "app.py").read_text(), "print('v2')\n")
+        self.assertTrue((proj / "src" / "util.py").is_file())
+        self.assertFalse((self.sb.tmp / "evil.py").exists())
+        self.assertTrue((proj / "README.md").is_file())                   # not chosen: kept
+        self.assertEqual(res["meta"]["verify"]["status"], "failed")       # checked here, on your computer
+        run = json.loads(self.call("/api/bridge/run", {"conversation_id": conv_id, "command": "python3 src/app.py"})[1])
+        self.assertEqual((run["code"], run["output"].strip()), (0, "v2"))
+        # the next request carries the work so far, the changed file and the failed check
+        nxt = json.loads(self.call("/api/bridge/prepare", {"text": "now add tests", "conversation_id": conv_id})[1])["package"]
+        self.assertIn("ملف تسليم المهمة", nxt)
+        self.assertIn("✔ src/util.py", nxt)
+        self.assertIn("<<<FILE: src/app.py>>>\nprint('v2')", nxt)
+        self.assertIn("نتيجة آخر تحقق على جهازي", nxt)
+        self.assertIn("نتيجة الأمر python3 src/app.py: نجح", nxt)
+        # undo restores the earlier files
+        self.call("/api/bridge/undo", {"conversation_id": conv_id, "message_id": res["message_id"]})
+        self.assertEqual((proj / "src" / "app.py").read_text(), "print('v1')\n")
+        self.assertFalse((proj / "src" / "util.py").exists())
+        self.assertEqual(self.call("/api/bridge/undo", {"conversation_id": conv_id, "message_id": res["message_id"]})[0], 400)
+
     def test_tools_effort_and_permissions(self):
         ev = self.chat(text="please USE_TOOL now", gateway="fake", effort="high", permission_mode="plan",
                        model="fake/model-2")

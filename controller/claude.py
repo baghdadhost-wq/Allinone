@@ -179,7 +179,7 @@ class ClaudeRuntime:
 
     def build_session(self, gw: Gateway, model: Optional[str], project: Path,
                       approval: Optional[Dict[str, str]] = None,
-                      extra_servers: Optional[Dict[str, Any]] = None) -> Session:
+                      extra_servers: Optional[Dict[str, Any]] = None, account: Optional[str] = None) -> Session:
         root = self.ctx.cfg.root
         sid = time.strftime("%Y%m%d-%H%M%S") + "-" + _secrets.token_hex(3)
         run_dir = self.ctx.run_dir / f"session-{sid}"
@@ -261,30 +261,34 @@ class ClaudeRuntime:
             args += ["--plugin-dir", str(d)]
         args += [str(a) for a in render(list(self.cfg.get("extra_args") or []), mapping, self.ctx.secrets)]
 
-        env = self.base_env(gw)
+        env = self.base_env(gw, account)
         env.update(env_block)
         return Session(cmd=[*cmd, *args], env=env, cwd=project, run_dir=run_dir,
                        info={"model": mapping["model"], "servers": list(servers), "plugins": len(self.plugin_dirs())})
 
-    def base_env(self, gw: Optional[Gateway] = None) -> Dict[str, str]:
-        """The environment Claude Code starts with, before the gateway variables are added."""
+    def base_env(self, gw: Optional[Gateway] = None, account: Optional[str] = None) -> Dict[str, str]:
+        """The environment Claude Code starts with, before the gateway variables are added.
+        For the direct Claude option each account has its own configuration folder (its own sign-in)."""
         keep = {"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"} if gw is not None and gw.keeps_user_credentials else set()
         env = {k: v for k, v in os.environ.items()
                if k in keep or (not k.startswith(STRIP_PREFIXES) and k not in STRIP_VARS)}
         if self.cfg.get("isolated_config", True):
             home = self.ctx.cfg.abs_path(self.cfg.get("config_dir") or (self.ctx.data_dir / "claude-home"))
+            if gw is None or gw.type_name == "anthropic":
+                from . import accounts
+                home = accounts.config_dir(self.ctx, account, home)
             home.mkdir(parents=True, exist_ok=True)
             env["CLAUDE_CONFIG_DIR"] = str(home)
         return env
 
     # ------------------------------------------------------- Anthropic account
-    def auth_status(self) -> Dict[str, Any]:
-        """`claude auth status` as a dict: {"loggedIn": bool, ...}."""
+    def auth_status(self, account: Optional[str] = None) -> Dict[str, Any]:
+        """`claude auth status` as a dict: {"loggedIn": bool, ...} — for one account (default: the active one)."""
         cmd = self.command()
         if not cmd:
             return {"loggedIn": False, "error": "not installed"}
         try:
-            out = subprocess.run([*cmd, "auth", "status"], env=self.base_env(), stdout=subprocess.PIPE,
+            out = subprocess.run([*cmd, "auth", "status"], env=self.base_env(None, account), stdout=subprocess.PIPE,
                                  stderr=subprocess.STDOUT, timeout=60)
         except (OSError, subprocess.TimeoutExpired) as exc:
             return {"loggedIn": False, "error": str(exc)}
@@ -317,9 +321,10 @@ class ClaudeRuntime:
                      resume: Optional[str] = None, permission_mode: Optional[str] = None,
                      allowed_tools: Optional[List[str]] = None, effort: Optional[str] = None,
                      approval: Optional[Dict[str, str]] = None, extra_args: Optional[List[str]] = None,
-                     extra_env: Optional[Dict[str, str]] = None, extra_servers: Optional[Dict[str, Any]] = None):
+                     extra_env: Optional[Dict[str, str]] = None, extra_servers: Optional[Dict[str, Any]] = None,
+                     account: Optional[str] = None):
         """Start `claude -p --output-format stream-json`; returns (Popen, Session). Caller cleans up the session."""
-        session = self.build_session(gw, model, project, approval=approval, extra_servers=extra_servers)
+        session = self.build_session(gw, model, project, approval=approval, extra_servers=extra_servers, account=account)
         session.env.update(extra_env or {})
         args = print_args("stream-json", permission_mode, allowed_tools, 0, resume, effort)
         if approval:

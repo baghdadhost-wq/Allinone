@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import parse_qs, urlsplit
 
-from . import __version__, flows, i18n, procs, ui
+from . import __version__, accounts, bridge, flows, i18n, procs, ui
 from .claude import ClaudeError
 from .gateways import GatewayError
 from .i18n import tr
@@ -1016,7 +1016,9 @@ class GuiApp:
         try:
             deep, memory = bool(req.get("deep")), bool(req.get("memory"))
             attachments = [str(a) for a in (req.get("attachments") or [])]
-            switching = bool(conv["session_id"]) and conv["session_gateway"] != gw.name
+            account = accounts.resolve(self.ctx, req.get("account")) if gw.type_name == "anthropic" else None
+            skey = accounts.session_key(gw, account)
+            switching = bool(conv["session_id"]) and conv["session_gateway"] != skey
             force_new = False
             if resume_req:
                 last = self.last_interruption(conv_id) or {}
@@ -1087,9 +1089,13 @@ class GuiApp:
         emit({"type": "start", "run_id": run_id, "conversation_id": conv_id, "sent": sent})
         base_meta = {"gateway": gw.name, "gateway_title": gw.title, "gateway_type": gw.type_name, "model": model or ""}
         tr_ = StreamTranslator()  # its clock starts now: gateway start-up time counts too
-        resume = conv["session_id"] if (conv["session_id"] and conv["session_gateway"] == gw.name and not force_new) else None
+        account = accounts.resolve(self.ctx, req.get("account")) if gw.type_name == "anthropic" else None
+        skey = accounts.session_key(gw, account)
+        if account:
+            base_meta["account"] = account
+        resume = conv["session_id"] if (conv["session_id"] and conv["session_gateway"] == skey and not force_new) else None
         try:
-            if flows.bring_up(self.ctx, gw, False):
+            if flows.bring_up(self.ctx, gw, False, account=account):
                 self.started_gateways.add(gw.name)
         except (GatewayError, ClaudeError, RuntimeError) as exc:
             diag = diagnose(gw.type_name, str(exc), gw_up=False)
@@ -1148,7 +1154,7 @@ class GuiApp:
                                                            permission_mode=mode, allowed_tools=allowed,
                                                            effort=effort or None, approval=approval,
                                                            extra_args=self.run_extra_args(project_id, verify, visual),
-                                                           extra_env=hook_env, extra_servers=servers)
+                                                           extra_env=hook_env, extra_servers=servers, account=account)
             tr_.mark("launch")
             with self.lock:
                 self.runs[run_id] = proc
@@ -1176,7 +1182,7 @@ class GuiApp:
                         emit(out)
                         if out["type"] == "init" and tr_.session_id:
                             # remember the session at once: a crash later can still be resumed from it
-                            store.update_conversation(conv_id, session_id=tr_.session_id, session_gateway=gw.name,
+                            store.update_conversation(conv_id, session_id=tr_.session_id, session_gateway=skey,
                                                       gateway=gw.name, model=model or "")
                         if hook_env is not None and time.time() - last_save > 0.5:
                             seen_checks = self._emit_verify(verify_state, seen_checks, emit)
@@ -1218,7 +1224,7 @@ class GuiApp:
             if not tr_.final_text():
                 tr_.parts.append({"kind": "text", "text": msg, "closed": True, "error": not stopped})
         if tr_.session_id:
-            store.update_conversation(conv_id, session_id=tr_.session_id, session_gateway=gw.name,
+            store.update_conversation(conv_id, session_id=tr_.session_id, session_gateway=skey,
                                       gateway=gw.name, model=model or "")
         verify_info = None
         if hook_env is not None:
@@ -1389,12 +1395,193 @@ class GuiApp:
         procs.kill_tree(proc.pid, timeout=5)
         return True
 
+    # ------------------------------------------------------- Claude.ai by hand
+    WEB_GATEWAY = "claude.ai"
+
+    def _hook_module(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("verify_stop", self.ctx.cfg.root / "claude" / "hooks" / "verify_stop.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def bridge_prepare(self, req: Dict[str, Any]) -> Dict[str, Any]:
+        text = str(req.get("text") or "").strip()
+        if not text:
+            raise ValueError(tr("Empty message.", "الرسالة فارغة."))
+        store = self.store()
+        conv_id = int(req.get("conversation_id") or 0)
+        conv = store.conversation(conv_id) if conv_id else None
+        project_id = conv["project_id"] if conv is not None else (int(req.get("project_id") or 0) or None)
+        proj = store.project(project_id) if project_id else None
+        if proj is None:
+            project_id = None
+        folder = Path(str((conv["project"] if conv is not None else "") or req.get("project")
+                          or (proj["folder"] if proj is not None and proj["folder"] else "") or self.project)).expanduser()
+        if not folder.is_dir():
+            raise ValueError(tr("Project folder not found: {p}", "مجلد المشروع غير موجود: {p}", p=folder))
+        created = conv is None
+        if created:
+            conv_id = store.new_conversation(re.sub(r"\s+", " ", text)[:60], self.WEB_GATEWAY, "", str(folder),
+                                             project_id=project_id)
+            conv = store.conversation(conv_id)
+        msgs = store.messages(conv_id)
+        handoff = (build_handoff_text(dict(conv), msgs, tr("continuing on Claude.ai", "متابعة عبر Claude.ai"),
+                                      dict(proj) if proj is not None else None) if msgs else "(بداية العمل)")
+        recent: List[str] = []
+        for m in reversed(msgs):
+            info = (m.get("meta") or {}).get("bridge")
+            for f in (info.get("files") or []) if isinstance(info, dict) else []:
+                if f.get("action") != "delete" and f["path"] not in recent:
+                    recent.append(f["path"])
+        attachments = [str(a) for a in req.get("attachments") or []]
+        budget = int(((self.ctx.cfg.get("gui") or {}).get("bridge") or {}).get("max_chars", 60000))
+        picked = bridge.pick_files(folder, text, attachments, recent, budget)
+        checks = self._bridge_checks_text(msgs)
+        tpl = read_prompt(self.ctx, "bridge_request.txt", bridge.REQUEST_TEMPLATE)
+        values = {"project": f"الاسم: {proj['name'] if proj is not None else folder.name}\nالمجلد: {folder}",
+                  "instructions": (f"تعليمات المشروع:\n{proj['instructions'].strip()}\n" if proj is not None
+                                   and proj["instructions"].strip() else ""),
+                  "handoff": handoff.strip(), "tree": bridge.tree_text(picked["entries"]),
+                  "files": bridge.files_text(picked["files"], picked["skipped"]),
+                  "checks": (f"\n===== نتيجة آخر تحقق على جهازي =====\n{checks}\n" if checks else ""), "request": text}
+        package = tpl
+        for k, v in values.items():
+            package = package.replace("{" + k + "}", v)
+        out = self.ctx.data_dir / "bridge"
+        out.mkdir(parents=True, exist_ok=True)
+        path = out / f"request-{conv_id}-{time.strftime('%Y%m%d-%H%M%S')}.txt"
+        path.write_text(package, encoding="utf-8")
+        mid = store.add_message(conv_id, "user", text, package, {"bridge": True, "attachments": attachments,
+                                                                 "files_sent": [r for r, _ in picked["files"]]})
+        return {"conversation_id": conv_id, "created": created, "title": conv["title"], "message_id": mid,
+                "package": package, "chars": len(package), "file": str(path), "name": path.name,
+                "files": [r for r, _ in picked["files"]], "skipped": picked["skipped"]}
+
+    @staticmethod
+    def _bridge_checks_text(msgs: List[Dict[str, Any]]) -> str:
+        last = next((m for m in reversed(msgs) if m["role"] == "assistant"), None)
+        if not last:
+            return ""
+        meta = last.get("meta") or {}
+        lines = []
+        ver = meta.get("verify") or {}
+        for c in (ver.get("checks") or [])[-1:]:
+            lines.append(f"أمر التحقق: {c.get('cmd')} → {'نجح' if c.get('code') == 0 else 'فشل (رمز ' + str(c.get('code')) + ')'}")
+            if c.get("code") != 0:
+                lines.append(_clip(c.get("output") or "", 3000))
+        for v in (ver.get("visual") or [])[-1:]:
+            lines.append(f"تجربة البرنامج فعلياً ({v.get('url') or ''}): {'سليمة' if v.get('ok') else 'فيها مشاكل'}")
+            lines += [f"- {_clip(p_, 800)}" for p_ in v.get("problems") or []]
+            if v.get("shots"):
+                lines.append("صور التجربة على جهازي (أرفقها هنا إن أردت أن تراها): "
+                             + "، ".join(Path(s_["path"]).name for s_ in v["shots"]))
+        for p_ in (meta.get("parts") or []):
+            if p_.get("kind") == "tool" and p_.get("name") == "Bash" and meta.get("bridge_run"):
+                lines.append(f"نتيجة الأمر {((p_.get('input') or {}).get('command'))}: "
+                             f"{'فشل' if p_.get('is_error') else 'نجح'}\n{_clip(p_.get('result') or '', 2500)}")
+        return "\n".join(lines)
+
+    def _bridge_folder(self, conv_id: int) -> Path:
+        conv = self.store().conversation(conv_id)
+        if conv is None:
+            raise ValueError(tr("Conversation not found.", "المحادثة غير موجودة."))
+        return Path(conv["project"]).expanduser()
+
+    def bridge_preview(self, conv_id: int, answer: str) -> Dict[str, Any]:
+        parsed = bridge.parse_answer(answer)
+        return {"plan": bridge.plan(self._bridge_folder(conv_id), parsed), "runs": parsed["runs"],
+                "text": parsed["text"][:4000]}
+
+    def bridge_apply(self, req: Dict[str, Any]) -> Dict[str, Any]:
+        conv_id = int(req.get("conversation_id") or 0)
+        folder = self._bridge_folder(conv_id)
+        answer = str(req.get("answer") or "")
+        parsed = bridge.parse_answer(answer)
+        plan_ = bridge.plan(folder, parsed)
+        paths = req.get("paths")
+        if paths is None:
+            paths = [x["path"] for x in plan_ if x["action"] in ("create", "modify", "delete")]
+        backup = self.ctx.data_dir / "bridge-backups" / str(conv_id) / time.strftime("%Y%m%d-%H%M%S")
+        done = bridge.apply(folder, parsed, [str(x) for x in paths], backup)
+        parts: List[Dict[str, Any]] = []
+        if parsed["text"]:
+            parts.append({"kind": "text", "text": parsed["text"], "closed": True})
+        for d in done:
+            parts.append({"kind": "tool", "name": "Delete" if d["action"] == "delete" else "Write",
+                          "input": {"file_path": d["path"]}, "result": d["action"], "is_error": False})
+        meta: Dict[str, Any] = {"gateway": self.WEB_GATEWAY, "gateway_title": "Claude.ai", "parts": parts,
+                                "bridge": {"files": done, "runs": parsed["runs"], "backup": str(backup),
+                                           "answer_chars": len(answer)}}
+        conv = self.store().conversation(conv_id)
+        verify_info = self._bridge_checks(conv, folder, bool(req.get("verify")), bool(req.get("visual"))) if done else None
+        if verify_info:
+            meta["verify"] = verify_info
+        mid = self.store().add_message(conv_id, "assistant", parsed["text"] or answer[:2000], answer, meta)
+        return {"message_id": mid, "meta": meta, "written": done}
+
+    def _bridge_checks(self, conv, folder: Path, verify: bool, visual: bool) -> Optional[Dict[str, Any]]:
+        """After writing an answer's files, check them here (the browser model cannot run anything)."""
+        info: Dict[str, Any] = {"status": "none", "cmd": "", "checks": []}
+        proj = self.store().project(conv["project_id"]) if conv["project_id"] else None
+        hook = self._hook_module()
+        if verify:
+            vc = self.verify_cfg()
+            cmd = ((proj["verify_command"] if proj is not None else "") or vc["command"]
+                   or (hook.detect_command(folder) if vc["auto_detect"] else "") or "")
+            if cmd:
+                c = hook.run_check(cmd, folder, vc["timeout_seconds"])
+                c["round"] = 1
+                info.update(cmd=cmd, status="passed" if c["code"] == 0 else "failed",
+                            checks=[{k: c.get(k) for k in ("round", "cmd", "code", "start", "end")} | {"output": _clip(c["output"], 3000)}])
+        py = self.visual_python() if visual else None
+        if py:
+            run_id = "bridge-" + secrets.token_hex(4)
+            env = self.visual_env(conv["project_id"], run_id, conv["id"], py)
+            cfg = json.loads(Path(env["ALLINONE_VISUAL_CONFIG"]).read_text(encoding="utf-8"))
+            cfg.update(cwd=str(folder), out_dir=str(Path(env["ALLINONE_VISUAL_OUT"]) / "round-1"))
+            cfg_file = Path(env["ALLINONE_VISUAL_OUT"]) / "config.json"
+            cfg_file.write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
+            start = time.time()
+            try:
+                res = subprocess.run([py, str(self.ctx.cfg.root / "claude" / "visual" / "visual_check.py"), str(cfg_file)],
+                                     capture_output=True, timeout=float(cfg.get("start_timeout") or 90) + 420)
+                result = json.loads(res.stdout.decode("utf-8", "replace") or "{}")
+            except (OSError, subprocess.SubprocessError, ValueError) as exc:
+                result = {"error": str(exc)}
+            entry = {k: result.get(k) for k in ("kind", "command", "url", "shots", "notes", "skipped", "error")}
+            ok = None if (result.get("skipped") or result.get("error")) else not result.get("problems")
+            entry.update(round=1, start=start, end=time.time(), ok=ok, problems=result.get("problems") or [])
+            info.update(visual=[entry], visual_status={True: "passed", False: "failed", None: "skipped"}[ok])
+        return info if (info["checks"] or info.get("visual")) else None
+
+    def bridge_run(self, conv_id: int, command: str) -> Dict[str, Any]:
+        folder = self._bridge_folder(conv_id)
+        hook = self._hook_module()
+        c = hook.run_check(command, folder, float(((self.ctx.cfg.get("gui") or {}).get("bridge") or {}).get("run_timeout", 600)))
+        meta = {"gateway": self.WEB_GATEWAY, "gateway_title": "Claude.ai", "bridge_run": True,
+                "parts": [{"kind": "tool", "name": "Bash", "input": {"command": command}, "result": _clip(c["output"], 6000),
+                           "is_error": c["code"] != 0}]}
+        mid = self.store().add_message(conv_id, "assistant", "", "", meta)
+        return {"message_id": mid, "meta": meta, "code": c["code"], "output": c["output"][-4000:]}
+
+    def bridge_undo(self, conv_id: int, message_id: int) -> Dict[str, Any]:
+        msg = next((m for m in self.store().messages(conv_id) if m["id"] == message_id), None)
+        info = ((msg or {}).get("meta") or {}).get("bridge")
+        info = info if isinstance(info, dict) else {}
+        if not info.get("backup") or info.get("undone"):
+            raise ValueError(tr("Nothing to undo.", "لا يوجد ما يُتراجع عنه."))
+        restored = bridge.undo(Path(info["backup"]))
+        msg["meta"]["bridge"]["undone"] = True
+        self.store().update_message(message_id, msg["display"], msg["meta"])
+        return {"restored": restored}
+
     # ----------------------------------------------------------------- login
-    def login(self) -> Dict[str, Any]:
+    def login(self, account: Optional[str] = None) -> Dict[str, Any]:
         claude = self.ctx.claude()
         gw = next((g for g in self.ctx.gateways().values() if g.type_name == "anthropic"), None)
         cmd = claude.auth_command("login")
-        env = claude.base_env(gw)
+        env = claude.base_env(gw, account)
         if os.name == "nt":
             subprocess.Popen(cmd, env=env, creationflags=0x00000010)  # CREATE_NEW_CONSOLE
             return {"ok": True, "mode": "window"}
@@ -1415,10 +1602,10 @@ class GuiApp:
         subprocess.Popen(cmd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return {"ok": True, "mode": "background"}
 
-    def logout(self) -> Dict[str, Any]:
+    def logout(self, account: Optional[str] = None) -> Dict[str, Any]:
         claude = self.ctx.claude()
         gw = next((g for g in self.ctx.gateways().values() if g.type_name == "anthropic"), None)
-        res = subprocess.run(claude.auth_command("logout"), env=claude.base_env(gw), stdout=subprocess.PIPE,
+        res = subprocess.run(claude.auth_command("logout"), env=claude.base_env(gw, account), stdout=subprocess.PIPE,
                              stderr=subprocess.STDOUT, timeout=60)
         return {"ok": res.returncode == 0, "text": res.stdout.decode("utf-8", "replace")[-500:]}
 
@@ -1856,7 +2043,11 @@ def make_handler(app: GuiApp):
                     gw = app.ctx.gateway((query.get("gateway") or [None])[0])
                     self._json(200, {"models": gw.models() if gw.is_up() else None})
                 elif path == "/api/auth":
-                    self._json(200, app.ctx.claude().auth_status())
+                    acc = (query.get("account") or [""])[0] or None
+                    self._json(200, {**app.ctx.claude().auth_status(account=acc),
+                                     "account": accounts.resolve(app.ctx, acc)})
+                elif path == "/api/accounts":
+                    self._json(200, {"accounts": accounts.listing(app.ctx, with_status=bool(query.get("status")))})
                 elif path == "/api/conversations":
                     pid = (query.get("project") or [""])[0]
                     rows = app.store().conversations(query=(query.get("q") or [""])[0],
@@ -1967,9 +2158,33 @@ def make_handler(app: GuiApp):
                             app.started_gateways.add(gw.name)
                     return self._json(200, {"url": gw.dashboard_url(), "notes": gw.dashboard_notes()})
                 if path == "/api/login":
-                    return self._json(200, app.login())
+                    return self._json(200, app.login(body.get("account") or None))
                 if path == "/api/logout":
-                    return self._json(200, app.logout())
+                    return self._json(200, app.logout(body.get("account") or None))
+                if path == "/api/bridge/prepare":
+                    return self._json(200, app.bridge_prepare(body))
+                if path == "/api/bridge/preview":
+                    return self._json(200, app.bridge_preview(int(body.get("conversation_id") or 0), str(body.get("answer") or "")))
+                if path == "/api/bridge/apply":
+                    return self._json(200, app.bridge_apply(body))
+                if path == "/api/bridge/run":
+                    return self._json(200, app.bridge_run(int(body.get("conversation_id") or 0), str(body.get("command") or "")))
+                if path == "/api/bridge/undo":
+                    return self._json(200, app.bridge_undo(int(body.get("conversation_id") or 0), int(body.get("message_id") or 0)))
+                if path == "/api/accounts":
+                    action = str(body.get("action") or "")
+                    if action == "add":
+                        acc = accounts.add(app.ctx, str(body.get("name") or ""))
+                        return self._json(200, {"id": acc, "accounts": accounts.listing(app.ctx)})
+                    if action == "remove":
+                        try:
+                            app.logout(str(body.get("id")))
+                        except Exception:
+                            pass
+                        accounts.remove(app.ctx, str(body.get("id") or ""))
+                    elif action == "activate":
+                        accounts.activate(app.ctx, str(body.get("id") or ""))
+                    return self._json(200, {"accounts": accounts.listing(app.ctx)})
                 if path == "/api/shutdown":
                     self._json(200, {"ok": True})
                     if app.httpd is not None:

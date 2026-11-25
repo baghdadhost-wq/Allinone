@@ -157,6 +157,15 @@ main{flex:1;display:flex;flex-direction:column;min-width:0}
 .modal .mbtns{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 .modal .muted{color:var(--muted);font-size:12.5px}
 @media (max-width:760px){.pgrid{grid-template-columns:1fr}}
+.bfiles{font-size:13px;margin:6px 0;display:flex;flex-direction:column;gap:3px}
+.bfiles .bf{display:flex;gap:8px;align-items:center}
+.bfiles code{direction:ltr;unicode-bidi:isolate}
+.bplan{display:flex;flex-direction:column;gap:4px;font-size:13px;max-height:260px;overflow:auto}
+.bplan label{display:flex;gap:8px;align-items:center;justify-content:flex-start}
+.bplan input{width:auto !important;flex:none}
+.bfiles > button{align-self:flex-start}
+.bplan .rej{color:var(--err)}
+.bsteps{font-size:13.5px;line-height:1.7}
 .vis{border:1px solid var(--line);border-radius:12px;padding:9px 11px;margin:8px 0;background:var(--panel)}
 .vis.bad{border-color:rgba(192,57,43,.35)}
 .vis.good{border-color:rgba(63,143,91,.45)}
@@ -204,6 +213,7 @@ pre.vout{white-space:pre-wrap;direction:ltr;text-align:left;max-height:200px;ove
       <button class="btn ghost small" id="sideBtn" aria-label="menu">☰</button>
       <div id="gwPills"></div>
       <button class="btn small" id="gwPower"></button>
+      <select id="account" class="btn small" style="display:none"></select>
       <button class="btn small" id="gwAction"></button>
       <span class="spacer"></span>
       <button class="btn small" id="preBtn"></button>
@@ -248,6 +258,13 @@ const I18N = {
     vRound:"🔁 تحقق آلي (الجولة {n})", vPass:"✔ نجح", vFail:"✘ فشل (رمز {code}) — أُعيد الخطأ إلى النموذج ليصلحه", vSelf:"🔎 لا يوجد أمر تحقق؛ طُلب من النموذج أن يجرّب النتيجة بنفسه",
     vBadge:{passed:"✔ تم التحقق", failed:"✘ فشل التحقق بعد {n} جولات", fixing:"✘ آخر تحقق فشل", self:"🔎 جرّبه النموذج بنفسه", skipped:"", none:""},
     projVerify:"أمر التحقق (مثل npm test أو pytest — فارغ = اكتشاف تلقائي)",
+    webPill:"🌐 Claude.ai يدوي", webTip:"أي حساب Claude في المتصفح (المجاني أيضاً). Allinone يجهّز الطلب كاملاً، وأنت تلصقه في Claude.ai وتلصق الجواب هنا، فتُكتب الملفات في مشروعك على جهازك. تستطيع المتابعة من حساب آخر في أي وقت.",
+    webTitle:"🌐 Claude.ai — أي حساب، والمشروع على جهازك", webStep1:"١- انسخ الطلب والصقه في محادثة جديدة في Claude.ai (أي حساب).", webCopy:"📋 نسخ وفتح Claude.ai", webDl:"⬇ تنزيل الطلب كملف",
+    webBig:"الطلب كبير؛ إن رفض Claude.ai لصقه فنزّله كملف وأرفقه في المحادثة.", webInfo:"{c} حرف · {f} ملفات من المشروع", webStep2:"٢- عندما يرد Claude اضغط زر النسخ أسفل رده، ثم الصقه هنا:",
+    webPreview:"معاينة التغييرات", webApply:"تطبيق على المشروع", webNoFiles:"لم أجد ملفات بالصيغة المطلوبة في الجواب. سيُحفظ الجواب نصاً فقط.", webLater:"لاحقاً",
+    webAct:{create:"＋ جديد", modify:"✎ تعديل", delete:"🗑 حذف", same:"= بلا تغيير", rejected:"✘ مرفوض"}, webRuns:"أوامر يقترحها الرد (شغّلها بزر بعد التطبيق):",
+    webWritten:"📝 كُتب في مشروعك:", webUndo:"↩ تراجع", webUndone:"تم التراجع عن هذه التغييرات.", webRun:"▶ تشغيل", webPaste:"📥 لصق جواب Claude.ai", webCopied:"نُسخ ✔ — الصقه في Claude.ai",
+    accAdd:"➕ إضافة حساب…", accRemove:"🗑 حذف هذا الحساب", accName:"اسم الحساب (مثلاً: العمل، الشخصي):", accRemoveAsk:"حذف هذا الحساب من Allinone وتسجيل خروجه؟ (المشاريع والمحادثات تبقى)", accTip:"حساب Claude المستخدم. لكل حساب تسجيل دخوله؛ وعند تغيير الحساب في محادثة تُنقل بملف تسليم.",
     visual:"تجربة فعلية", visualTip:"تشغيل البرنامج فعلياً واستخدامه وأخذ صور بمراحله المختلفة، مع مراجعة الصور بنموذج يرى الصور، وإعادة أي مشكلة إلى النموذج ليصلحها (مثل Claude)",
     visualMissing:"(غير مثبتة)", visualInstallAsk:"التجربة الفعلية تحتاج تثبيت Playwright (التحكم بالمتصفح) مرة واحدة، ويُنزَّل متصفح فقط إن لم يوجد Chrome أو Edge. التثبيت الآن؟",
     visualInstalling:"جارٍ تثبيت التجربة الفعلية…", visualReady:"التجربة الفعلية جاهزة ✔", visualFailed:"تعذّر التثبيت:",
@@ -290,6 +307,13 @@ const I18N = {
     vRound:"🔁 Automatic check (round {n})", vPass:"✔ passed", vFail:"✘ failed (code {code}) — sent back to the model to fix", vSelf:"🔎 No check command; the model was asked to test its own result",
     vBadge:{passed:"✔ Verified", failed:"✘ Verification failed after {n} rounds", fixing:"✘ Last check failed", self:"🔎 Self-tested by the model", skipped:"", none:""},
     projVerify:"Check command (e.g. npm test or pytest — empty = detect)",
+    webPill:"🌐 Claude.ai by hand", webTip:"Any Claude account in the browser (free too). Allinone prepares the whole request; you paste it into Claude.ai and paste the answer here, and the files are written into your project on your computer. Continue from another account any time.",
+    webTitle:"🌐 Claude.ai — any account, the project stays on your computer", webStep1:"1. Copy the request and paste it into a new Claude.ai chat (any account).", webCopy:"📋 Copy & open Claude.ai", webDl:"⬇ Download the request as a file",
+    webBig:"The request is large; if Claude.ai refuses the paste, download it and attach the file instead.", webInfo:"{c} characters · {f} project files", webStep2:"2. When Claude answers, press the copy button under its answer and paste it here:",
+    webPreview:"Preview changes", webApply:"Apply to the project", webNoFiles:"No files in the expected format were found; the answer is saved as text only.", webLater:"Later",
+    webAct:{create:"＋ new", modify:"✎ change", delete:"🗑 delete", same:"= unchanged", rejected:"✘ rejected"}, webRuns:"Commands suggested by the answer (run them with a button after applying):",
+    webWritten:"📝 Written into your project:", webUndo:"↩ Undo", webUndone:"These changes were undone.", webRun:"▶ Run", webPaste:"📥 Paste a Claude.ai answer", webCopied:"Copied ✔ — paste it into Claude.ai",
+    accAdd:"➕ Add account…", accRemove:"🗑 Remove this account", accName:"Account name (e.g. Work, Personal):", accRemoveAsk:"Remove this account from Allinone and sign it out? (projects and chats stay)", accTip:"The Claude account used. Each account has its own sign-in; switching account in a chat moves it with a hand-over note.",
     visual:"Real test", visualTip:"Run the program for real, use it and take screenshots of each stage, have a model that sees review them, and send problems back to be fixed (like Claude)",
     visualMissing:"(not installed)", visualInstallAsk:"Real testing needs Playwright (browser automation) installed once; a browser is downloaded only if Chrome/Edge is missing. Install now?",
     visualInstalling:"Installing real testing…", visualReady:"Real testing is ready ✔", visualFailed:"Install failed:",
@@ -415,15 +439,38 @@ for(const [id, key] of [["visual","visual"],["verify","verify"],["deep","deep"],
 
 /* ---------- gateways ---------- */
 function gwInfo(name){ return (S.state.gateways||[]).find(g=>g.name===name); }
+const WEB = "__web__";
+let ACCOUNTS = [];
+async function loadAccounts(){ try{ ACCOUNTS = (await api("/api/accounts")).accounts; }catch(e){ ACCOUNTS = []; } renderAccounts(); }
+function renderAccounts(){
+  const sel = $("#account"); const g = gwInfo(S.gateway);
+  if(!g || g.type!=="anthropic"){ sel.style.display="none"; return; }
+  sel.style.display=""; sel.title = t("accTip");
+  if(!ACCOUNTS.some(a=>a.id===S.account)) S.account = (ACCOUNTS.find(a=>a.active)||ACCOUNTS[0]||{id:"default"}).id;
+  sel.innerHTML = ACCOUNTS.map(a=>`<option value="${esc(a.id)}" ${a.id===S.account?"selected":""}>👤 ${esc(a.name)}</option>`).join("")
+    + `<option value="__add">${esc(t("accAdd"))}</option>` + (S.account!=="default"?`<option value="__rm">${esc(t("accRemove"))}</option>`:"");
+}
+$("#account").onchange = async e=>{
+  const v = e.target.value;
+  if(v==="__add"){
+    const name = prompt(t("accName")); if(name && name.trim()){ try{ const r = await api("/api/accounts",{method:"POST",body:{action:"add",name:name.trim()}}); ACCOUNTS = r.accounts; S.account = r.id; }catch(err){ banner(err.message,true); } }
+  } else if(v==="__rm"){
+    if(confirm(t("accRemoveAsk"))){ try{ ACCOUNTS = (await api("/api/accounts",{method:"POST",body:{action:"remove",id:S.account}})).accounts; S.account = "default"; }catch(err){ banner(err.message,true); } }
+  } else {
+    S.account = v; try{ await api("/api/accounts",{method:"POST",body:{action:"activate",id:v}}); }catch(err){}
+  }
+  LS.set("account", S.account); renderAccounts(); refreshAuth();
+};
 function renderPills(){
   if(!S.state) return;
   $("#gwPills").innerHTML = S.state.gateways.map(g=>{
     let cls = "d-" + (!g.installed ? "err" : g.type==="anthropic" ? (S.auth==null ? "off" : (S.auth.loggedIn ? "up" : "warn")) : (g.up ? "up" : "off"));
     const tip = !g.installed ? t("notInstalled") : g.type==="anthropic" ? (S.auth&&S.auth.loggedIn?t("loggedIn"):t("notLoggedIn")) : (g.up?t("running"):t("stopped"));
     return `<button class="pill ${g.name===S.gateway?"active":""}" data-gw="${esc(g.name)}" title="${esc(tip)}"><span class="dot ${cls}"></span>${esc(g.title)}</button>`;
-  }).join("");
+  }).join("") + `<button class="pill ${S.gateway===WEB?"active":""}" data-gw="${WEB}" title="${esc(t("webTip"))}">${esc(t("webPill"))}</button>`;
   document.querySelectorAll(".pill").forEach(b=>b.onclick=()=>selectGateway(b.dataset.gw));
   const g = gwInfo(S.gateway); const act = $("#gwAction"); const pw = $("#gwPower");
+  renderAccounts();
   if(!g){ act.style.display="none"; pw.style.display="none"; return; } act.style.display="";
   if(g.type==="anthropic" || !g.can_start || !g.installed){ pw.style.display="none"; }
   else { pw.style.display=""; pw.textContent = g.up ? t("powerOff") : t("powerOn"); pw.classList.toggle("on", g.up); }
@@ -436,8 +483,8 @@ $("#gwAction").onclick = async ()=>{
   const g = gwInfo(S.gateway); if(!g) return;
   try{
     if(g.type==="anthropic"){
-      if(S.auth && S.auth.loggedIn){ await api("/api/logout",{method:"POST"}); await refreshAuth(); }
-      else { await api("/api/login",{method:"POST"}); banner(t("loginOpened")); pollAuth(); }
+      if(S.auth && S.auth.loggedIn){ await api("/api/logout",{method:"POST",body:{account:S.account}}); await refreshAuth(); }
+      else { await api("/api/login",{method:"POST",body:{account:S.account}}); banner(t("loginOpened")); pollAuth(); }
       return;
     }
     banner(t("startingGw"));
@@ -461,9 +508,10 @@ $("#quitBtn").onclick = async ()=>{
   try{ await api("/api/shutdown",{method:"POST"}); }catch(e){}
   document.body.innerHTML = `<div style="padding:60px;text-align:center;font-size:18px">${esc(t("quitDone"))}</div>`;
 };
-async function refreshAuth(){ try{ S.auth = await api("/api/auth"); }catch(e){ S.auth = {loggedIn:false}; } renderPills(); }
+async function refreshAuth(){ try{ S.auth = await api("/api/auth"+(S.account?"?account="+encodeURIComponent(S.account):"")); }catch(e){ S.auth = {loggedIn:false}; } renderPills(); }
 function pollAuth(n=0){ setTimeout(async()=>{ await refreshAuth(); if(!(S.auth&&S.auth.loggedIn) && n<60) pollAuth(n+1); else if(S.auth&&S.auth.loggedIn) banner(""); }, 3000); }
 async function loadModels(){
+  if(S.gateway===WEB){ $("#model").value=""; $("#model").placeholder="claude.ai"; $("#modelList").innerHTML=""; return; }
   const g = gwInfo(S.gateway); const input = $("#model");
   input.value = LS.get("model:"+S.gateway, "");
   input.placeholder = (g && g.default_model) || t("gwDefault");
@@ -506,7 +554,9 @@ async function openConv(id){
   S.projectId = r.conversation.project_id || null; S.projectName = r.conversation.project_name || "";
   S.preapprove = !!r.conversation.preapproved;
   if(r.conversation.project){ S.project = r.conversation.project; showProject(); }
-  if(r.conversation.gateway && gwInfo(r.conversation.gateway)) selectGateway(r.conversation.gateway);
+  if(r.conversation.gateway==="claude.ai") selectGateway(WEB);
+  else if(r.conversation.gateway && gwInfo(r.conversation.gateway)) selectGateway(r.conversation.gateway);
+  const sg = r.conversation.session_gateway||""; if(sg.includes("#")){ S.account = sg.split("#")[1]; LS.set("account", S.account); renderAccounts(); refreshAuth(); }
   renderPre(); renderProjChip(); renderThread(); loadConvs();
   if(r.conversation.running) watchConv(id);
 }
@@ -632,6 +682,70 @@ function renderProjChip(){
   const b = $("#projLeave"); if(b) b.onclick = ()=>newChat(false);
 }
 
+/* ---------- Claude.ai by hand ---------- */
+async function webSend(){
+  const text = input.value.trim(); if(!text || S.running || S.attachments.some(a=>!a.path)) return;
+  banner(""); if(S.view==="project"){ if(S.pview) startProjectChat(S.pview); else newChat(false); }
+  let r; try{ r = await api("/api/bridge/prepare",{method:"POST",body:{text, conversation_id:S.conv, project:S.project, project_id:S.projectId,
+    attachments:S.attachments.map(a=>a.path)}}); }catch(e){ banner(e.message,true); return; }
+  input.value=""; autosize(); updateSend(); S.attachments=[]; renderChips();
+  if(r.created){ S.conv = r.conversation_id; loadConvs(); renderProjChip(); }
+  S.messages.push({id:r.message_id, role:"user", display:text, sent:r.package, meta:{bridge:true}}); renderThread();
+  openBridge(r);
+}
+function openBridge(r){
+  const head = r ? `<div class="bsteps">${esc(t("webStep1"))}<div class="muted">${esc(fmt(t("webInfo"),{c:r.chars.toLocaleString(), f:r.files.length}))}${r.chars>40000?" · "+esc(t("webBig")):""}</div>
+      <div class="mbtns" style="margin:6px 0 10px"><button class="btn primary" id="bCopy">${esc(t("webCopy"))}</button><button class="btn" id="bDl">${esc(t("webDl"))}</button></div></div>` : "";
+  openModal(`<h3>${esc(t("webTitle"))}</h3><div class="mbody">${head}<div class="bsteps">${esc(t("webStep2"))}</div>
+    <textarea id="bAnswer" dir="auto" placeholder="<<<FILE: ...>>>"></textarea><div id="bPlan"></div></div>
+    <div class="mbtns"><button class="btn" id="bLater">${esc(t("webLater"))}</button><span class="spacer"></span>
+      <button class="btn" id="bPreview">${esc(t("webPreview"))}</button><button class="btn primary" id="bApply" disabled>${esc(t("webApply"))}</button></div>`);
+  $("#bLater").onclick = closeModal;
+  if(r){
+    $("#bCopy").onclick = async ()=>{ try{ await navigator.clipboard.writeText(r.package); }catch(e){ const ta=document.createElement("textarea"); ta.value=r.package; document.body.append(ta); ta.select(); document.execCommand("copy"); ta.remove(); }
+      $("#bCopy").textContent = t("webCopied"); window.open("https://claude.ai/new", "_blank", "noopener"); };
+    $("#bDl").onclick = ()=>{ const a=document.createElement("a"); a.href=URL.createObjectURL(new Blob([r.package],{type:"text/plain;charset=utf-8"})); a.download=r.name; a.click(); };
+  }
+  let plan = null;
+  $("#bPreview").onclick = async ()=>{
+    const answer = $("#bAnswer").value; if(!answer.trim()) return;
+    try{ plan = await api("/api/bridge/preview",{method:"POST",body:{conversation_id:S.conv, answer}}); }catch(e){ banner(e.message,true); return; }
+    const acts = t("webAct");
+    $("#bPlan").innerHTML = (plan.plan.length ? `<div class="bplan">${plan.plan.map((x,i)=>`<label class="${x.action==="rejected"?"rej":""}"><input type="checkbox" data-bp="${i}" ${["create","modify","delete"].includes(x.action)?"checked":"disabled"}>
+        <span>${esc(acts[x.action]||x.action)}</span><code>${esc(x.path)}</code><span class="muted">${x.added!=null?`+${x.added} −${x.removed}`:""} ${esc(x.why||"")}</span></label>`).join("")}</div>` : `<div class="muted">${esc(t("webNoFiles"))}</div>`)
+      + (plan.runs.length ? `<div class="muted" style="margin-top:6px">${esc(t("webRuns"))}</div>${plan.runs.map(c=>`<code dir="ltr">${esc(c)}</code>`).join("<br>")}` : "");
+    $("#bApply").disabled = false;
+  };
+  $("#bApply").onclick = async ()=>{
+    if(!plan) return;
+    const paths = [...document.querySelectorAll("[data-bp]")].filter(b=>b.checked).map(b=>plan.plan[+b.dataset.bp].path);
+    $("#bApply").disabled = true; $("#bApply").textContent = "…";
+    try{ const res = await api("/api/bridge/apply",{method:"POST",body:{conversation_id:S.conv, answer:$("#bAnswer").value, paths,
+          verify:$("#verify").checked, visual:$("#visual").checked}});
+      closeModal(); const txt = (res.meta.parts||[]).filter(p=>p.kind==="text").map(p=>p.text).join("\n\n");
+      S.messages.push({id:res.message_id, role:"assistant", display:txt, meta:res.meta}); renderThread(); loadConvs();
+    }catch(e){ banner(e.message,true); $("#bApply").disabled = false; $("#bApply").textContent = t("webApply"); }
+  };
+  $("#bAnswer").focus();
+}
+function bridgeHTML(m){
+  const b = (m.meta||{}).bridge; if(!b || typeof b!=="object") return "";
+  const acts = t("webAct");
+  const files = (b.files||[]).map(f=>`<div class="bf"><span>${esc(acts[f.action]||f.action)}</span><code>${esc(f.path)}</code></div>`).join("");
+  const runs = (b.runs||[]).map(c=>`<div class="bf"><button class="btn small" data-brun="${esc(c)}">${esc(t("webRun"))}</button><code>${esc(c)}</code></div>`).join("");
+  const undo = b.undone ? `<div class="muted">${esc(t("webUndone"))}</div>` : (b.files||[]).length && m.id ? `<button class="btn small" data-bundo="${m.id}">${esc(t("webUndo"))}</button>` : "";
+  return `<div class="bfiles">${files?`<div class="muted">${esc(t("webWritten"))}</div>${files}`:""}${runs}${undo}</div>`;
+}
+document.addEventListener("click", async e=>{
+  const run = e.target.closest("[data-brun]"), und = e.target.closest("[data-bundo]");
+  if(!run && !und) return;
+  try{
+    if(run){ run.disabled = true; const r = await api("/api/bridge/run",{method:"POST",body:{conversation_id:S.conv, command:run.dataset.brun}});
+      S.messages.push({id:r.message_id, role:"assistant", display:"", meta:r.meta}); renderThread(); }
+    if(und){ await api("/api/bridge/undo",{method:"POST",body:{conversation_id:S.conv, message_id:+und.dataset.bundo}}); openConv(S.conv); }
+  }catch(err){ banner(err.message,true); }
+});
+
 /* ---------- pre-approval ---------- */
 function renderPre(){ const b = $("#preBtn"); b.textContent = S.preapprove ? t("preOn") : t("preOff"); b.classList.toggle("on", S.preapprove); }
 $("#preBtn").onclick = async ()=>{
@@ -672,6 +786,7 @@ $("#reportBtn").onclick = async ()=>{
 /* ---------- upload an answer ---------- */
 $("#answerBtn").onclick = ()=>openAnswer();
 function openAnswer(){
+  if(S.gateway===WEB && S.conv) return openBridge(null);
   openModal(`<h3>${esc(t("answerTitle"))}</h3><div class="mbody"><div class="muted" dir="auto">${esc(t("answerHelp"))}</div>
     <textarea id="anText" dir="auto" placeholder="…"></textarea>
     <input id="anNote" dir="auto" placeholder="${esc(t("answerNote"))}"></div>
@@ -768,12 +883,12 @@ function interruptHTML(meta){
 }
 function assistantHTML(m, isLast){
   const meta = m.meta||{}; const parts = meta.parts || [{kind:"text", text:m.display}];
-  const all = SHOWALL();
+  const all = SHOWALL() || meta.bridge_run;
   const body = parts.filter(p=>all || p.kind!=="tool").map(p=>p.kind==="tool"?toolHTML(p):(p.error?`<div class="err">${esc(p.text)}</div>`:md(p.text))).join("");
   if(!all){  // only the answer
     const intrQ = (isLast && meta.interrupted && !S.running) ? interruptHTML(meta) : "";
     if(!body && !intrQ) return "";
-    return `<div class="msg assistant" data-text="${esc(m.display)}"><div class="body">${body}</div>${metaHTML(meta)}${intrQ}</div>`;
+    return `<div class="msg assistant" data-text="${esc(m.display)}"><div class="body">${body}${bridgeHTML(m)}</div>${metaHTML(meta)}${intrQ}</div>`;
   }
   const auto = (meta.approvals||[]).filter(a=>a.auto).map(a=>`<div class="notice">${esc(fmt(t("preAuto"),{t:a.tool}))}</div>`).join("");
   const intr = (isLast && meta.interrupted && !S.running) ? interruptHTML(meta) : "";
@@ -785,7 +900,7 @@ function assistantHTML(m, isLast){
     const badge = fmt((t("vBadge")||{})[v.status]||"", {n:(v.checks||[]).length});
     if(badge) ver += `<div class="vbadge ${v.status==="passed"?"ok":v.status==="self"?"":"bad"}">${esc(badge)}${v.cmd?` · <code>${esc(v.cmd)}</code>`:""}</div>`;
   }
-  return `<div class="msg assistant" data-text="${esc(m.display)}"><div class="body">${auto}${body}${ver}</div>${metaHTML(meta)}${intr}</div>`;
+  return `<div class="msg assistant" data-text="${esc(m.display)}"><div class="body">${auto}${body}${bridgeHTML(m)}${ver}</div>${metaHTML(meta)}${intr}</div>`;
 }
 function renderThread(){
   if(S.view==="project") return renderProjectView();
@@ -847,6 +962,7 @@ async function stopRun(){ if(S.running){ try{ await api("/api/stop",{method:"POS
 
 async function send(extra){
   extra = extra || {};
+  if(S.gateway===WEB && !extra.expert && !extra.resume) return webSend();
   const expert = extra.expert || null, resume = !!extra.resume;
   const text = (expert||resume) ? (extra.text||"") : input.value.trim();
   if((!text && !expert && !resume) || S.running || (!resume && S.attachments.some(a=>!a.path))) return;
@@ -862,7 +978,7 @@ async function send(extra){
   S.running = run; if(!expert && !resume){ input.value=""; autosize(); } updateSend(); renderThread();
   const payload = {text, gateway:S.gateway, model:$("#model").value.trim(), effort:$("#effort").value, permission_mode:$("#perm").value,
     deep, memory, attachments:atts, project:S.project, conversation_id:S.conv, resume,
-    project_id:S.projectId, preapprove:S.preapprove, verify:$("#verify").checked, visual:$("#visual").checked};
+    project_id:S.projectId, preapprove:S.preapprove, verify:$("#verify").checked, visual:$("#visual").checked, account:S.account};
   if(expert) payload.expert = expert;
   if(!resume){ S.attachments = []; renderChips(); }
   let finalMeta = null;
@@ -949,10 +1065,11 @@ async function boot(){
   S.lang = LS.get("lang", S.state.lang || "ar");
   $("#ver").textContent = "v"+S.state.version;
   const saved = LS.get("gateway", null);
-  S.gateway = gwInfo(saved) ? saved : S.state.default_gateway;
+  S.gateway = (gwInfo(saved) || saved===WEB) ? saved : S.state.default_gateway;
   S.project = LS.get("project", S.state.project) || S.state.project; showProject();
   try{ S.projects = (await api("/api/projects")).projects; }catch(e){}
-  applyLang(); loadModels(); loadConvs(); refreshAuth(); updateSend(); input.focus();
+  S.account = LS.get("account", "default");
+  applyLang(); loadModels(); loadConvs(); loadAccounts(); refreshAuth(); updateSend(); input.focus();
   setInterval(()=>{ if(!S.running) refreshState(); }, 15000);
 }
 boot();
