@@ -55,6 +55,18 @@ SELF_CHECK = """قبل أن تنهي: لا يوجد أمر تحقق آلي له�
 إذا ظهرت مشكلة فأصلحها وأعد التجربة، وإذا فشل الأسلوب نفسه مرتين فجرّب أسلوباً آخر.
 ثم اختم بسطر يبدأ بـ «التحقق:» يذكر ما جرّبته والنتيجة."""
 
+VISUAL_FIX = """جرّب Allinone البرنامج فعلياً: شغّله{command} وفتح {url} واستخدمه، وأخذ {count} صورة للمراحل المختلفة في:
+{dir}
+ظهرت هذه المشاكل (الجولة {round} من {max}):
+{problems}
+
+الصور بالترتيب:
+{shots}
+
+إذا كنت تستطيع رؤية الصور فافتحها بأداة Read وانظر إليها بنفسك. وبعد الإصلاح جرّب البرنامج بنفسك بأدوات المتصفح
+(mcp__allinone_browser__browser_open و browser_click و browser_screenshot و browser_console) قبل أن تنهي.
+لا تنهِ العمل بعد: أصلح كل مشكلة من سببها الجذري."""
+
 EDIT_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
 
 
@@ -171,6 +183,93 @@ def save(path: Optional[str], state: Dict[str, Any]) -> None:
     os.replace(tmp, p)
 
 
+def _review(shots: List[Dict[str, Any]], problems: List[str]) -> Optional[Dict[str, Any]]:
+    """Ask Allinone to have a model that can see images look at the screenshots."""
+    url = os.environ.get("ALLINONE_REVIEW_URL")
+    if not url or not shots:
+        return None
+    import urllib.request
+    body = json.dumps({"token": os.environ.get("ALLINONE_REVIEW_TOKEN", ""), "run_id": os.environ.get("ALLINONE_REVIEW_RUN", ""),
+                       "shots": shots, "problems": problems}).encode("utf-8")
+    req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(req, timeout=float(os.environ.get("ALLINONE_REVIEW_TIMEOUT") or 420)) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:
+        return {"verdict": "error", "problems": [], "text": f"تعذّرت مراجعة الصور: {exc}"}
+
+
+def visual_stage(state: Dict[str, Any], state_path: Optional[str], cwd: Path, max_rounds: int) -> int:
+    """Run the program for real, take screenshots, have them reviewed; block with what is wrong."""
+    py = os.environ.get("ALLINONE_VISUAL_PYTHON", "")
+    visual = state.setdefault("visual", [])
+    n = len(visual) + 1
+    try:
+        cfg = json.loads(Path(os.environ["ALLINONE_VISUAL_CONFIG"]).read_text(encoding="utf-8"))
+    except (KeyError, OSError, ValueError):
+        cfg = {}
+    cfg.setdefault("cwd", str(cwd))
+    cfg["out_dir"] = str(Path(os.environ.get("ALLINONE_VISUAL_OUT") or (cwd / ".allinone-visual")) / f"round-{n}")
+    Path(cfg["out_dir"]).mkdir(parents=True, exist_ok=True)
+    cfg_file = Path(cfg["out_dir"]) / "config.json"
+    cfg_file.write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
+    start = time.time()
+    entry: Dict[str, Any] = {"round": n, "start": start}
+    try:
+        proc = subprocess.run([py, str(ROOT / "claude" / "visual" / "visual_check.py"), str(cfg_file)],
+                              capture_output=True, timeout=float(cfg.get("start_timeout") or 90) + 420,
+                              stdin=subprocess.DEVNULL)
+        result = json.loads(proc.stdout.decode("utf-8", "replace") or "{}")
+        if not result and proc.stderr:
+            result = {"error": proc.stderr.decode("utf-8", "replace")[-1500:]}
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        result = {"error": str(exc)}
+    entry.update({k: result.get(k) for k in ("kind", "command", "url", "shots", "notes", "skipped", "error", "app_log")})
+    problems = list(result.get("problems") or [])
+    if result.get("skipped") or result.get("error"):
+        entry.update(end=time.time(), ok=None, problems=problems)
+        visual.append(entry)
+        state["visual_status"] = "skipped"
+        save(state_path, state)
+        return 0  # could not try the program: do not hold the model on that
+    review = _review(result.get("shots") or [], problems)
+    if review:
+        entry["review"] = review
+        problems += [f"مراجعة الصور ({review.get('reviewer') or 'نموذج يرى الصور'}): {x}" for x in review.get("problems") or []]
+    entry.update(end=time.time(), ok=not problems, problems=problems)
+    visual.append(entry)
+    if not problems:
+        state["visual_status"] = "passed"
+        save(state_path, state)
+        return 0
+    state["rounds"] = int(state.get("rounds", 0)) + 1
+    if state["rounds"] >= max_rounds + 1:
+        state["visual_status"] = "failed"
+        save(state_path, state)
+        return 0
+    sig = signature("\n".join(problems))
+    repeated = sig in state.get("signatures", [])
+    state.setdefault("signatures", []).append(sig)
+    state["visual_status"] = "fixing"
+    save(state_path, state)
+    shots = result.get("shots") or []
+    reason = _template("visual_fix.txt", VISUAL_FIX)
+    values = {"command": f" بالأمر {entry.get('command')}" if entry.get("command") else "", "url": entry.get("url") or "",
+              "count": len(shots), "dir": cfg["out_dir"], "round": state["rounds"], "max": max_rounds,
+              "problems": "\n".join(f"- {x}" for x in problems)[:6000],
+              "shots": "\n".join(f"- {s_['path']}  ({s_.get('name')}: {s_.get('title') or ''} {s_.get('url') or ''})" for s_ in shots)}
+    for key, val in values.items():
+        reason = reason.replace("{" + key + "}", str(val))
+    if repeated or state["rounds"] >= 2:
+        reason += "\n\n" + _template("verify_change_approach.txt", CHANGE)
+    return block(reason)
+
+
+def visual_on() -> bool:
+    return os.environ.get("ALLINONE_VISUAL") == "1" and bool(os.environ.get("ALLINONE_VISUAL_PYTHON"))
+
+
 def block(reason: str) -> int:
     sys.stdout.write(json.dumps({"decision": "block", "reason": reason}, ensure_ascii=False))
     return 0
@@ -197,16 +296,20 @@ def main() -> int:
         cmd = detect_command(cwd) or ""
     state["cmd"] = cmd
 
+    edited = edits_in_last_turn(event.get("transcript_path") or "")
     if not cmd:
+        if visual_on() and edited:
+            save(state_path, state)
+            return visual_stage(state, state_path, cwd, max_rounds)
         # Nothing to run: ask the model once to test its own work, if it changed files.
-        if not state.get("self_check") and edits_in_last_turn(event.get("transcript_path") or ""):
+        if not state.get("self_check") and edited:
             state["self_check"], state["status"] = True, "self"
             save(state_path, state)
             return block(_template("verify_self_check.txt", SELF_CHECK))
         save(state_path, state)
         return 0
 
-    if not state.get("checks") and not edits_in_last_turn(event.get("transcript_path") or ""):
+    if not state.get("checks") and not edited:
         state["status"] = "skipped"  # nothing changed since the request: nothing to verify
         save(state_path, state)
         return 0
@@ -217,6 +320,8 @@ def main() -> int:
     if check["code"] == 0:
         state["status"] = "passed"
         save(state_path, state)
+        if visual_on():  # the code works: now try the program itself
+            return visual_stage(state, state_path, cwd, max_rounds)
         return 0
     state["rounds"] = int(state.get("rounds", 0)) + 1
     if state["rounds"] >= max_rounds + 1:

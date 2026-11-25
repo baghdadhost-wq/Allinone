@@ -5,7 +5,8 @@
   },
   "permissions": {
     "allow": [
-      "mcp__allinone"
+      "mcp__allinone",
+      "mcp__allinone_browser"
     ]
   },
   "hooks": {

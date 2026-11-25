@@ -101,6 +101,8 @@ def _call(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
     except Exception as exc:  # report to Claude instead of crashing the server
         log(traceback.format_exc())
         return {"content": [{"type": "text", "text": f"{type(exc).__name__}: {exc}"}], "isError": True}
+    if isinstance(value, dict) and isinstance(value.get("_content"), list):
+        return {"content": value["_content"], "isError": False}  # ready-made content, e.g. text + an image
     text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, indent=2, default=str)
     return {"content": [{"type": "text", "text": text}], "isError": False}
 

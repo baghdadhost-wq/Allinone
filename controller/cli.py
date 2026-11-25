@@ -112,7 +112,7 @@ def build_parser(gateway_names: List[str]) -> argparse.ArgumentParser:
     for name, helptext in (("install", tr("install components", "تثبيت المكونات")),
                            ("update", tr("update components", "تحديث المكونات"))):
         i = sub.add_parser(name, help=helptext)
-        i.add_argument("components", nargs="*", help="all | node | claude | " + " | ".join(gateway_names))
+        i.add_argument("components", nargs="*", help="all | node | claude | visual | " + " | ".join(gateway_names))
         i.add_argument("--force", action="store_true", help=tr("reinstall even if present", "إعادة التثبيت حتى لو كان موجوداً"))
         i.add_argument("--latest", action="store_true", help=tr("use the newest published version", "استخدام أحدث إصدار منشور"))
         i.add_argument("--rebuild", action="store_true", help=tr("rebuild a source install after editing it",

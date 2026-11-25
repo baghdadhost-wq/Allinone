@@ -28,20 +28,20 @@ def expand(ctx, components: Sequence[str]) -> List[str]:
     for c in wanted:
         if c == "all":
             out += ["node", *gws, "claude"]
-        elif c in ("node", "claude", *gws):
+        elif c in ("node", "claude", "visual", *gws):
             out.append(c)
         elif c in ("claude-code", "claudecode"):
             out.append("claude")
         else:
-            raise SystemExit(tr("Unknown component '{c}'. Use: all, node, claude, {g}",
-                                "مكوّن غير معروف '{c}'. استخدم: all, node, claude, {g}", c=c, g=", ".join(gws)))
+            raise SystemExit(tr("Unknown component '{c}'. Use: all, node, claude, visual, {g}",
+                                "مكوّن غير معروف '{c}'. استخدم: all, node, claude, visual, {g}", c=c, g=", ".join(gws)))
     seen, ordered = set(), []
     for c in out:
         if c not in seen:
             seen.add(c)
             ordered.append(c)
     # Node.js first: everything else needs it.
-    if any(c != "node" for c in ordered) and "node" not in ordered and ctx.node.mode == "portable" \
+    if any(c not in ("node", "visual") for c in ordered) and "node" not in ordered and ctx.node.mode == "portable" \
             and not ctx.node.ready():
         ordered.insert(0, "node")
     return ordered
@@ -63,6 +63,10 @@ def install(ctx, components: Sequence[str], force: bool = False, latest: bool = 
                 ctx.node.ensure(force=force, refresh=refresh)
             elif comp == "claude":
                 ctx.claude().install(force=force or refresh, latest=latest)
+            elif comp == "visual":
+                from . import visual
+                if not visual.install(ctx, force=force):
+                    raise RuntimeError(tr("visual testing could not be installed", "تعذّر تثبيت التجربة المرئية"))
             else:
                 ctx.gateway(comp).install(force=force, latest=latest, rebuild=rebuild, refresh=refresh)
         except (NodeError, procs.CommandError, RuntimeError, OSError) as exc:
@@ -103,6 +107,12 @@ def doctor(ctx) -> bool:
     if not ver and ctx.node.mode == "portable":
         node_detail += tr("  — run: allinone install node", "  — نفّذ: allinone install node")
     add("Node.js", supported(ver), node_detail)
+
+    from . import visual as vis
+    vst = vis.status(ctx)
+    add(tr("Visual testing", "التجربة المرئية"), vst["available"],
+        (f"{vst['python']} · {vst['browser'] or tr('Playwright Chromium', 'Chromium من Playwright')}" if vst["available"]
+         else tr("optional — run: allinone install visual", "اختيارية — نفّذ: allinone install visual")), required=False)
 
     for gw in ctx.gateways().values():
         st = gw.status()

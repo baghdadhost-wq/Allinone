@@ -178,7 +178,8 @@ class ClaudeRuntime:
         return dirs
 
     def build_session(self, gw: Gateway, model: Optional[str], project: Path,
-                      approval: Optional[Dict[str, str]] = None) -> Session:
+                      approval: Optional[Dict[str, str]] = None,
+                      extra_servers: Optional[Dict[str, Any]] = None) -> Session:
         root = self.ctx.cfg.root
         sid = time.strftime("%Y%m%d-%H%M%S") + "-" + _secrets.token_hex(3)
         run_dir = self.ctx.run_dir / f"session-{sid}"
@@ -247,6 +248,7 @@ class ClaudeRuntime:
             env_block.setdefault("MCP_TOOL_TIMEOUT", "3600000")  # a person may take a while to answer
             settings["env"] = env_block
             atomic_write_json(settings_path, settings, private=True)
+        servers.update(extra_servers or {})
         mcp_path = run_dir / "mcp.json"
         atomic_write_json(mcp_path, {"mcpServers": servers}, private=True)
 
@@ -315,9 +317,9 @@ class ClaudeRuntime:
                      resume: Optional[str] = None, permission_mode: Optional[str] = None,
                      allowed_tools: Optional[List[str]] = None, effort: Optional[str] = None,
                      approval: Optional[Dict[str, str]] = None, extra_args: Optional[List[str]] = None,
-                     extra_env: Optional[Dict[str, str]] = None):
+                     extra_env: Optional[Dict[str, str]] = None, extra_servers: Optional[Dict[str, Any]] = None):
         """Start `claude -p --output-format stream-json`; returns (Popen, Session). Caller cleans up the session."""
-        session = self.build_session(gw, model, project, approval=approval)
+        session = self.build_session(gw, model, project, approval=approval, extra_servers=extra_servers)
         session.env.update(extra_env or {})
         args = print_args("stream-json", permission_mode, allowed_tools, 0, resume, effort)
         if approval:

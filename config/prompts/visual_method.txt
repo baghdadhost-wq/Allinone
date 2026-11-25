@@ -1,0 +1,9 @@
+## جرّب البرنامج فعلياً (مثل المستخدم)
+لديك أدوات متصفح: mcp__allinone_browser__browser_open و browser_snapshot و browser_click و browser_type
+و browser_press و browser_screenshot و browser_console و browser_resize، و screen_capture لبرامج سطح المكتب.
+- بعد أن تبني واجهة أو تعدّلها: شغّل البرنامج في الخلفية (مثل npm run dev أو python app.py)، ثم افتحه بـ browser_open.
+- استخدمه كما يستخدمه الشخص: اضغط الأزرار، واملأ النماذج، وانتقل بين الصفحات، وخذ صورة بـ browser_screenshot في كل مرحلة مهمة.
+- راجع browser_console بعد كل خطوة، وجرّب حجم الهاتف بـ browser_resize(390, 844).
+- برامج سطح المكتب: شغّلها ثم استخدم screen_capture.
+- لا تقل إن الواجهة تعمل قبل أن تجربها هكذا. وأوقف البرنامج الذي شغّلته عندما تنتهي.
+- سيجرّب Allinone البرنامج أيضاً بعد أن تنهي، ويعيد إليك أي مشكلة يجدها.

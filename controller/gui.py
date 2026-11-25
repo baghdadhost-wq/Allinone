@@ -110,7 +110,7 @@ TIME_CATS = [
     ("model_wait", "انتظار النموذج/البوابة حتى أول حرف من الرد (بين الأوامر)", "wait"),
     ("generation", "كتابة النموذج للرد أو الكود (عمل)", "work"),
     ("tools", "تنفيذ الأوامر والأدوات (عمل)", "work"),
-    ("verify", "تحقق Allinone الآلي (تشغيل الاختبارات)", "work"),
+    ("verify", "تحقق Allinone الآلي (الاختبارات وتجربة البرنامج)", "work"),
     ("approval", "انتظار إذنك", "user"),
     ("finishing", "إنهاء الجلسة", "wait"),
 ]
@@ -151,7 +151,8 @@ def analyze_timing(meta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     tools: Dict[str, Dict[str, Any]] = {}
     names = {p.get("id"): p.get("name") for p in meta.get("parts") or [] if p.get("kind") == "tool"}
 
-    checks = [(c["start"] - t0, c["end"] - t0) for c in (meta.get("verify") or {}).get("checks") or []
+    ver_ = meta.get("verify") or {}
+    checks = [(c["start"] - t0, c["end"] - t0) for c in (ver_.get("checks") or []) + (ver_.get("visual") or [])
               if c.get("start") and c.get("end")]
 
     def add(cat: str, a: float, b: float) -> None:
@@ -376,6 +377,22 @@ def build_report_text(conv: Dict[str, Any], messages: List[Dict[str, Any]], head
                     out.append("    " + _clip(c.get("output") or "", 1500).replace("\n", "\n    "))
                     errors.append(f"الدور {turn}: فشل التحقق الآلي ({c.get('cmd')})، الجولة {c.get('round')}: "
                                   + _clip(c.get("output") or "", 400))
+        for v in (ver or {}).get("visual") or []:
+            head = {True: "✔ نجحت", False: "✘ ظهرت مشاكل", None: "⏭ لم تُنفَّذ"}.get(v.get("ok"), "")
+            out.append(f"[تجربة البرنامج فعلياً] الجولة {v.get('round')}: {head} ⏱ {_clock(v.get('start'))} ← "
+                       f"{_clock(v.get('end'))} ({_dur((v.get('end') or 0) - (v.get('start') or 0))})")
+            if v.get("command") or v.get("url"):
+                out.append(f"  التشغيل: {v.get('command') or '—'} · الرابط: {v.get('url') or '—'}")
+            if v.get("skipped") or v.get("error"):
+                out.append("  " + str(v.get("skipped") or v.get("error"))[:600])
+            for sh in v.get("shots") or []:
+                out.append(f"  📷 {sh.get('name')}: {sh.get('path')}")
+            for pr in v.get("problems") or []:
+                out.append("  ✘ " + _clip(pr, 800).replace("\n", "\n    "))
+                errors.append(f"الدور {turn}: تجربة البرنامج — " + _clip(pr, 300))
+            rv = v.get("review") or {}
+            if rv:
+                out.append(f"  👁 مراجعة الصور ({rv.get('reviewer') or '—'}): {rv.get('verdict')}")
         if tm:
             out += ["", "  تحليل الوقت لهذا الرد:"]
             for key, label, _ in TIME_CATS:
@@ -409,6 +426,50 @@ def build_report_text(conv: Dict[str, Any], messages: List[Dict[str, Any]], head
     out += ["", "=" * 70, f"ملخص الأخطاء ({len(errors)})", "=" * 70]
     out += [f"{i}. {e}" for i, e in enumerate(errors, 1)] or ["لم تُسجَّل أخطاء صريحة؛ راجع الخطوات أعلاه."]
     return "\n".join(out) + "\n"
+
+
+# ------------------------------------------------------------ visual testing texts
+VISUAL_METHOD = """## جرّب البرنامج فعلياً (مثل المستخدم)
+لديك أدوات متصفح: mcp__allinone_browser__browser_open و browser_snapshot و browser_click و browser_type
+و browser_press و browser_screenshot و browser_console و browser_resize، و screen_capture لبرامج سطح المكتب.
+- بعد أن تبني واجهة أو تعدّلها: شغّل البرنامج في الخلفية (مثل npm run dev أو python app.py)، ثم افتحه بـ browser_open.
+- استخدمه كما يستخدمه الشخص: اضغط الأزرار، واملأ النماذج، وانتقل بين الصفحات، وخذ صورة بـ browser_screenshot في كل مرحلة مهمة.
+- راجع browser_console بعد كل خطوة، وجرّب حجم الهاتف بـ browser_resize(390, 844).
+- برامج سطح المكتب: شغّلها ثم استخدم screen_capture.
+- لا تقل إن الواجهة تعمل قبل أن تجربها هكذا. وأوقف البرنامج الذي شغّلته عندما تنتهي.
+- سيجرّب Allinone البرنامج أيضاً بعد أن تنهي، ويعيد إليك أي مشكلة يجدها."""
+
+VISUAL_REVIEW = """أنت مراجع واجهات دقيق. طلب المستخدم كان:
+{request}
+
+هذه صور التُقطت أثناء تشغيل البرنامج فعلياً واستخدامه، بالترتيب:
+{shots}
+
+مشاكل اكتشفها Allinone آلياً:
+{problems}
+
+اقرأ كل صورة بأداة Read وانظر إليها فعلاً. ثم احكم: هل تلبي النتيجة الطلب؟ وهل الواجهة سليمة؟
+ابحث عن: صفحة فارغة، رسالة خطأ ظاهرة، عناصر مكسورة أو متداخلة أو خارج الشاشة، نص مقطوع أو غير مقروء،
+صور لا تظهر، تخطيط مكسور على الهاتف، أزرار لا تفعل شيئاً، أو أي شيء مختلف عما طُلب.
+
+أجب بهذه الصيغة فقط:
+VERDICT: OK
+أو
+VERDICT: PROBLEMS
+- اسم الصورة: وصف محدد للمشكلة وما يجب إصلاحه
+(سطر لكل مشكلة)"""
+
+
+def parse_review(text: str) -> tuple:
+    """VERDICT: OK / VERDICT: PROBLEMS + "- ..." lines → (verdict, problems)."""
+    m = re.search(r"VERDICT:\s*(OK|PROBLEMS)", text or "", re.I)
+    if not m:
+        return "unclear", []
+    if m.group(1).upper() == "OK":
+        return "ok", []
+    tail = text[m.end():]
+    problems = [l.strip()[1:].strip() for l in tail.splitlines() if l.strip().startswith(("-", "•", "*"))]
+    return "problems", [p for p in problems if p][:15] or [tail.strip()[:500] or "مشكلة غير محددة"]
 
 
 # ------------------------------------------------------------ interruptions
@@ -586,6 +647,11 @@ def build_handoff_text(conv: Dict[str, Any], messages: List[Dict[str, Any]], rea
         out += ["", "## آخر تحقق آلي", f"- {'✔ نجح' if c.get('code') == 0 else '✘ فشل'}: {c.get('cmd')}"]
         if c.get("code") != 0:
             out.append(_clip(c.get("output") or "", 1500))
+    if last_ver and last_ver.get("visual"):
+        v = last_ver["visual"][-1]
+        out += ["", "## آخر تجربة فعلية للبرنامج", f"- {'✔ سليمة' if v.get('ok') else '✘ فيها مشاكل'} ({v.get('url') or ''})"]
+        out += [f"- {_clip(p, 500)}" for p in v.get("problems") or []]
+        out += [f"- صورة: {s.get('path')}" for s in (v.get("shots") or [])[:8]]
     if last_text:
         out += ["", "## آخر ما كتبه المساعد", _clip(last_text, 3000)]
     return "\n".join(out) + "\n"
@@ -802,6 +868,7 @@ class GuiApp:
             "deep_template": read_prompt(self.ctx, "deep_thinking.txt", ""),
             "max_upload_mb": self.max_upload() // (1024 * 1024),
             "report_ask": read_prompt(self.ctx, "report_request.txt", REPORT_ASK),
+            "visual": self.visual_status(),
         }
 
     def max_upload(self) -> int:
@@ -1045,8 +1112,22 @@ class GuiApp:
         allowed = list((self.ctx.cfg.get("tasks") or {}).get("allowed_tools") or [])
         tr_.mark("gateway_ready")
         verify = bool(req.get("verify"))
+        visual = bool(req.get("visual"))
+        visual_py = self.visual_python() if visual else None
+        if visual and not visual_py:
+            visual = False
+            emit({"type": "notice", "text": tr(
+                "Visual testing is not installed yet: press 👁 to install it, or run: allinone install visual",
+                "التجربة المرئية غير مثبتة بعد: اضغط 👁 لتثبيتها، أو نفّذ: allinone install visual")})
         verify_state = self.ctx.data_dir / "verify" / f"{run_id}.json"
-        seen_checks = 0
+        seen_checks: Dict[str, Any] = {"checks": 0, "visual": 0, "self": False}
+        hook_env = self.verify_env(project_id, run_id) if (verify or visual) else None
+        if hook_env is not None and not verify:  # only the visual test: no command check
+            hook_env.update(ALLINONE_VERIFY_CMD="", ALLINONE_VERIFY_DETECT="0")
+        servers = None
+        if visual:
+            hook_env.update(self.visual_env(project_id, run_id, conv_id, visual_py))
+            servers = self.browser_server(run_id, gw, visual_py)
         # The reply is stored right away and updated while it streams, so nothing is lost if Allinone
         # or the computer stops in the middle.
         base_meta["started_at"] = tr_.started
@@ -1066,8 +1147,8 @@ class GuiApp:
             proc, session = self.ctx.claude().start_stream(gw, model, project, sent, resume=resume,
                                                            permission_mode=mode, allowed_tools=allowed,
                                                            effort=effort or None, approval=approval,
-                                                           extra_args=self.run_extra_args(project_id, verify),
-                                                           extra_env=self.verify_env(project_id, run_id) if verify else None)
+                                                           extra_args=self.run_extra_args(project_id, verify, visual),
+                                                           extra_env=hook_env, extra_servers=servers)
             tr_.mark("launch")
             with self.lock:
                 self.runs[run_id] = proc
@@ -1097,7 +1178,7 @@ class GuiApp:
                             # remember the session at once: a crash later can still be resumed from it
                             store.update_conversation(conv_id, session_id=tr_.session_id, session_gateway=gw.name,
                                                       gateway=gw.name, model=model or "")
-                        if verify and time.time() - last_save > 0.5:
+                        if hook_env is not None and time.time() - last_save > 0.5:
                             seen_checks = self._emit_verify(verify_state, seen_checks, emit)
                         if out["type"] in ("tool_result", "tool_use") or time.time() - last_save > 2:
                             store.update_message(mid, tr_.final_text(), {**base_meta, "running": True, "parts": tr_.parts,
@@ -1140,7 +1221,7 @@ class GuiApp:
             store.update_conversation(conv_id, session_id=tr_.session_id, session_gateway=gw.name,
                                       gateway=gw.name, model=model or "")
         verify_info = None
-        if verify:
+        if hook_env is not None:
             self._emit_verify(verify_state, seen_checks, emit)
             verify_info = self._read_verify(verify_state)
             try:
@@ -1174,19 +1255,30 @@ class GuiApp:
             return None
         checks = [{k: c.get(k) for k in ("round", "cmd", "code", "start", "end")} | {"output": _clip(c.get("output") or "", 3000)}
                   for c in data.get("checks") or []]
-        return {"status": data.get("status") or "none", "cmd": data.get("cmd") or "", "checks": checks}
+        visual = [{k: v.get(k) for k in ("round", "start", "end", "ok", "problems", "shots", "url", "command", "kind",
+                                         "notes", "skipped", "error", "review")}
+                  for v in data.get("visual") or []]
+        out = {"status": data.get("status") or "none", "cmd": data.get("cmd") or "", "checks": checks}
+        if visual or data.get("visual_status"):
+            out.update(visual=visual, visual_status=data.get("visual_status") or "none")
+        return out
 
-    def _emit_verify(self, path: Path, seen: int, emit) -> int:
-        """Tell the page about each automatic check as soon as the Stop hook has run it."""
+    def _emit_verify(self, path: Path, seen: Dict[str, Any], emit) -> Dict[str, Any]:
+        """Tell the page about each automatic check and visual test as soon as the Stop hook has run it."""
         info = self._read_verify(path) if path.exists() else None
         if not info:
             return seen
-        for c in info["checks"][seen:]:
+        for c in info["checks"][seen["checks"]:]:
             emit({"type": "verify", "check": {**c, "output": c["output"][-1500:]}, "status": info["status"]})
-        if info["status"] == "self" and seen == 0 and not info["checks"]:
+        seen["checks"] = max(seen["checks"], len(info["checks"]))
+        for v in (info.get("visual") or [])[seen["visual"]:]:
+            if v.get("end"):
+                emit({"type": "visual", "entry": v, "status": info.get("visual_status")})
+                seen["visual"] += 1
+        if info["status"] == "self" and not seen["self"] and not info["checks"]:
             emit({"type": "verify", "check": None, "status": "self"})
-            return 10 ** 9  # announced once; there is no command, so no checks will follow
-        return max(seen, len(info["checks"]))
+            seen["self"] = True
+        return seen
 
     def live_state(self, conv_id: int) -> Dict[str, Any]:
         """For a page that (re)opens a conversation while its reply is still running."""
@@ -1402,14 +1494,159 @@ class GuiApp:
                 "ALLINONE_VERIFY_ROUNDS": str(cfg["max_rounds"]), "ALLINONE_VERIFY_TIMEOUT": str(cfg["timeout_seconds"]),
                 "ALLINONE_VERIFY_STATE": str(state)}
 
-    def run_extra_args(self, project_id: Optional[int], verify: bool = False) -> List[str]:
+    # ------------------------------------------------------------- visual testing
+    def visual_cfg(self) -> Dict[str, Any]:
+        cfg = (self.ctx.cfg.get("gui") or {}).get("visual") or {}
+        rev = cfg.get("reviewer") or {}
+        return {"start_timeout": float(cfg.get("start_timeout", 90)), "max_pages": int(cfg.get("max_pages", 4)),
+                "mobile": cfg.get("mobile", True), "model_tools": cfg.get("model_tools", True),
+                "model_sees_images": cfg.get("model_sees_images", "auto"),
+                "reviewer_gateway": str(rev.get("gateway", "auto") if isinstance(rev, dict) else rev),
+                "reviewer_model": str(rev.get("model", "") if isinstance(rev, dict) else ""),
+                "review_timeout": float(cfg.get("review_timeout", 360))}
+
+    def visual_status(self) -> Dict[str, Any]:
+        st = dict(getattr(self, "_visual_job", None) or {})
+        return {"available": bool(self.visual_python()), "installing": st.get("running", False),
+                "log": "\n".join(st.get("log", [])[-12:]), "ok": st.get("ok")}
+
+    def install_visual(self) -> Dict[str, Any]:
+        """Install the visual-testing tools in the background; the page polls visual_status()."""
+        from . import visual as vis
+        job = getattr(self, "_visual_job", None)
+        if job and job.get("running"):
+            return self.visual_status()
+        job = self._visual_job = {"running": True, "log": [], "ok": None}
+
+        def work():
+            try:
+                job["ok"] = vis.install(self.ctx, log=lambda m: job["log"].extend(str(m).splitlines()))
+            except Exception as exc:
+                job["log"].append(str(exc))
+                job["ok"] = False
+            finally:
+                job["running"] = False
+                vis._cache.pop("py", None)
+
+        threading.Thread(target=work, daemon=True).start()
+        return self.visual_status()
+
+    def visual_python(self) -> Optional[str]:
+        from . import visual as vis
+        return vis.python_for_visual(self.ctx)
+
+    def visual_env(self, project_id: Optional[int], run_id: str, conv_id: int, py: str) -> Dict[str, str]:
+        from . import visual as vis
+        cfg = self.visual_cfg()
+        proj = self.store().project(project_id) if project_id else None
+        out = self.ctx.data_dir / "visual" / run_id
+        out.mkdir(parents=True, exist_ok=True)
+        base = {"app_command": proj["app_command"] if proj is not None else "",
+                "app_url": proj["app_url"] if proj is not None else "",
+                "kind": (proj["app_kind"] if proj is not None and proj["app_kind"] else "auto"),
+                "steps": proj["visual_steps"] if proj is not None else "",
+                "browser": vis.browser_path(self.ctx), "start_timeout": cfg["start_timeout"],
+                "max_pages": cfg["max_pages"], "mobile": cfg["mobile"], "python": self.ctx.python}
+        (out / "base-config.json").write_text(json.dumps(base, ensure_ascii=False), encoding="utf-8")
+        return {"ALLINONE_VISUAL": "1", "ALLINONE_VISUAL_PYTHON": py, "ALLINONE_VISUAL_CONFIG": str(out / "base-config.json"),
+                "ALLINONE_VISUAL_OUT": str(out), "ALLINONE_REVIEW_URL": self.base_url() + "/internal/review?t=" + self.token,
+                "ALLINONE_REVIEW_RUN": run_id, "ALLINONE_REVIEW_TIMEOUT": str(cfg["review_timeout"] + 60)}
+
+    def model_sees_images(self, gw) -> bool:
+        v = self.visual_cfg()["model_sees_images"]
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, list):
+            return gw.name in v
+        return gw.type_name == "anthropic"  # "auto": Claude always sees images; others may be text-only
+
+    def browser_server(self, run_id: str, gw, py: str) -> Optional[Dict[str, Any]]:
+        from . import visual as vis
+        if not self.visual_cfg()["model_tools"]:
+            return None
+        return {"allinone_browser": {
+            "command": py, "args": [str(self.ctx.cfg.root / "claude" / "mcp" / "browser_server.py")],
+            "env": {"ALLINONE_VISUAL_OUT": str(self.ctx.data_dir / "visual" / run_id / "model"),
+                    "ALLINONE_BROWSER": vis.browser_path(self.ctx),
+                    "ALLINONE_BROWSER_IMAGES": "1" if self.model_sees_images(gw) else "0",
+                    "PYTHONIOENCODING": "utf-8"}}}
+
+    def reviewer_gateway(self, run_id: str):
+        """The model that looks at the screenshots: configured, or Claude when it is available."""
+        cfg = self.visual_cfg()
+        name = cfg["reviewer_gateway"].strip()
+        if name.lower() in ("", "off", "none", "false"):
+            return None
+        if name.lower() != "auto":
+            try:
+                return self.ctx.gateway(name)
+            except (GatewayError, KeyError, SystemExit, ValueError):
+                return None
+        run_gw = self.run_gateways.get(run_id)
+        if run_gw:
+            gw = self.ctx.gateway(run_gw)
+            if gw.type_name == "anthropic":
+                return gw
+        for gw in self.ctx.gateways().values():
+            if gw.type_name == "anthropic":
+                try:
+                    if self.ctx.claude().auth_status().get("loggedIn"):
+                        return gw
+                except Exception:
+                    pass
+        return None
+
+    def review_shots(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        """Called by the Stop hook: a model that can see images looks at the screenshots."""
+        run_id = str(body.get("run_id") or "")
+        shots = [s for s in body.get("shots") or [] if isinstance(s, dict) and s.get("path")]
+        emit = self.run_emit.get(run_id)
+        gw = self.reviewer_gateway(run_id)
+        if gw is None or not shots:
+            return {"verdict": "skipped", "problems": [], "text": tr(
+                "No model that can see images is set up for review (gui.visual.reviewer).",
+                "لا يوجد نموذج يرى الصور لمراجعتها (gui.visual.reviewer)."), "reviewer": ""}
+        cfg = self.visual_cfg()
+        conv = self.run_conv.get(run_id)
+        request = ""
+        if conv:
+            users = [m for m in self.store().messages(conv) if m["role"] == "user" and not (m.get("meta") or {}).get("resume")]
+            request = users[-1]["display"] if users else ""
+        lines = "\n".join(f"{i}. {s['path']}  — {s.get('name')}: {s.get('title') or ''} {s.get('url') or ''}"
+                          for i, s in enumerate(shots, 1))
+        known = "\n".join(f"- {p}" for p in body.get("problems") or []) or "لا شيء"
+        prompt = (read_prompt(self.ctx, "visual_review.txt", VISUAL_REVIEW).replace("{request}", request)
+                  .replace("{shots}", lines).replace("{problems}", known))
+        if emit:
+            emit({"type": "notice", "text": tr("👁 {g} is looking at {n} screenshot(s)…", "👁 {g} يراجع {n} صورة…",
+                                               g=gw.title, n=len(shots))})
+        try:
+            if flows.bring_up(self.ctx, gw, False):
+                self.started_gateways.add(gw.name)
+            res = self.ctx.claude().run_headless(gw, cfg["reviewer_model"] or None, Path(shots[0]["path"]).parent, prompt,
+                                                 allowed_tools=["Read"], max_turns=20, timeout=cfg["review_timeout"])
+            text = str(res.get("result") or "")
+        except Exception as exc:  # a review that cannot run must not block the work
+            return {"verdict": "error", "problems": [], "text": str(exc), "reviewer": gw.title}
+        verdict, problems = parse_review(text)
+        out = {"verdict": verdict, "problems": problems, "text": text[-3000:],
+               "reviewer": gw.title + (f" · {cfg['reviewer_model']}" if cfg["reviewer_model"] else "")}
+        if emit:
+            emit({"type": "visual_review", **out})
+        return out
+
+    def run_extra_args(self, project_id: Optional[int], verify: bool = False, visual: bool = False) -> List[str]:
         """Folders Claude Code may read besides the working folder, plus instructions to append to its system
         prompt: the work method (verify & fix) and the project's instructions."""
         dirs = [self.uploads, self.reports, self.transcripts]
+        if visual:
+            dirs.append(self.ctx.data_dir / "visual")
         args: List[str] = []
         sections: List[str] = []
-        if verify and self.verify_cfg()["work_method"]:
+        if (verify or visual) and self.verify_cfg()["work_method"]:
             sections.append(read_prompt(self.ctx, "work_method.txt", "").strip())
+        if visual:
+            sections.append(read_prompt(self.ctx, "visual_method.txt", VISUAL_METHOD).strip())
         proj = self.store().project(project_id) if project_id else None
         if proj is not None:
             files = self.store().project_files(project_id)
@@ -1427,7 +1664,7 @@ class GuiApp:
         if sections:
             # one file: Claude Code takes a single --append-system-prompt-file
             folder = self.projects_dir / str(project_id) if proj is not None else self.ctx.data_dir / "system-prompts"
-            prompt_file = folder / ("system-prompt-verify.md" if verify else "system-prompt.md")
+            prompt_file = folder / ("system-prompt" + ("-verify" if verify else "") + ("-visual" if visual else "") + ".md")
             prompt_file.parent.mkdir(parents=True, exist_ok=True)
             prompt_file.write_text("\n\n".join(sections) + "\n", encoding="utf-8")
             args += ["--append-system-prompt-file", str(prompt_file)]
@@ -1490,6 +1727,24 @@ def make_handler(app: GuiApp):
         # ------------------------------------------------------------ helpers
         def _host_ok(self) -> bool:
             return (self.headers.get("Host") or "").lower() in app.allowed_hosts
+
+        def _image(self, raw: str) -> None:
+            """Screenshots taken by the visual test (only from data/visual)."""
+            root = (app.ctx.data_dir / "visual").resolve()
+            try:
+                path = Path(raw).resolve()
+                path.relative_to(root)
+            except (ValueError, OSError):
+                return self._json(403, {"error": "not allowed"})
+            if path.suffix.lower() not in (".png", ".jpg", ".jpeg") or not path.is_file():
+                return self._json(404, {"error": "not found"})
+            data = path.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png" if path.suffix.lower() == ".png" else "image/jpeg")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "private, max-age=3600")
+            self.end_headers()
+            self.wfile.write(data)
 
         def _token_ok(self, query: Dict[str, List[str]]) -> bool:
             given = self.headers.get("X-Allinone-Token") or (query.get("t") or [""])[0]
@@ -1587,6 +1842,10 @@ def make_handler(app: GuiApp):
                     self.wfile.write(data)
                 elif path == "/api/state":
                     self._json(200, app.state())
+                elif path == "/api/visual":
+                    self._json(200, app.visual_status())
+                elif path == "/api/image":
+                    return self._image((query.get("path") or [""])[0])
                 elif path == "/api/models":
                     gw = app.ctx.gateway((query.get("gateway") or [None])[0])
                     self._json(200, {"models": gw.models() if gw.is_up() else None})
@@ -1669,6 +1928,10 @@ def make_handler(app: GuiApp):
                 if m := re.fullmatch(r"/api/projects/(\d+)/files", path):
                     return self._upload(query, project_id=int(m.group(1)))
                 body = self._body()
+                if path == "/internal/review":
+                    return self._json(200, app.review_shots(body))
+                if path == "/api/visual/install":
+                    return self._json(200, app.install_visual())
                 if path == "/internal/approval":
                     return self._json(200, app.request_approval(str(body.get("run_id") or ""),
                                                                 str(body.get("tool_name") or ""),

@@ -92,6 +92,10 @@ def run_stop_hooks(argv, sid, prompt):
         emit({"type": "assistant", "message": {"content": [{"type": "text", "text": f"fixing round {round_ + 1}"}]}})
         if "FIX_ON_BLOCK" in prompt and round_ + 1 > fix_after:
             open("fixed.txt", "w").close()
+            if os.environ.get("FAKE_FIX_FILE"):  # e.g. the missing image the visual test reported
+                import base64
+                with open(os.environ["FAKE_FIX_FILE"], "wb") as fh:
+                    fh.write(base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="))
         active = True
     return reasons
 
@@ -223,7 +227,13 @@ def main():
     elif "-p" in argv:
         prompt = sys.stdin.read()
         record["prompt"] = prompt
-        text = ask_gateway(prompt)
+        if "VERDICT" in prompt:  # Allinone's screenshot review
+            with open(os.environ["FAKE_CLAUDE_RECORD"] + ".review.txt", "w", encoding="utf-8") as fh:
+                fh.write(prompt)
+            text = ("VERDICT: PROBLEMS\n- 01-start.png: زر «أضف» مخفي خلف الصورة\n- 03-mobile.png: النص مقطوع"
+                    if "REVIEW_FAIL" in prompt else "VERDICT: OK")
+        else:
+            text = ask_gateway(prompt)
         print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": text,
                           "session_id": "sess-" + str(abs(hash(prompt)) % 10000), "num_turns": 1,
                           "duration_ms": 12, "total_cost_usd": 0}))

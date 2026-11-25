@@ -93,9 +93,10 @@ def connect(path: Path) -> sqlite3.Connection:
         conn.execute("ALTER TABLE conversations ADD COLUMN project_id INTEGER")
         conn.commit()
     pcols = {r[1] for r in conn.execute("PRAGMA table_info(projects)")}
-    if "verify_command" not in pcols:
-        conn.execute("ALTER TABLE projects ADD COLUMN verify_command TEXT NOT NULL DEFAULT ''")
-        conn.commit()
+    for col in ("verify_command", "app_command", "app_url", "app_kind", "visual_steps"):
+        if col not in pcols:  # added by later versions
+            conn.execute(f"ALTER TABLE projects ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
+    conn.commit()
     return conn
 
 
@@ -248,7 +249,8 @@ class Store:
         return out
 
     # ------------------------------------------------------------------ projects
-    PROJECT_FIELDS = ("name", "description", "instructions", "folder", "gateway", "model", "verify_command")
+    PROJECT_FIELDS = ("name", "description", "instructions", "folder", "gateway", "model", "verify_command",
+                      "app_command", "app_url", "app_kind", "visual_steps")
 
     def new_project(self, **fields: Any) -> int:
         now = time.time()

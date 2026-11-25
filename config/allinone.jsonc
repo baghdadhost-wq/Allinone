@@ -165,6 +165,21 @@
       "max_rounds": 3,                  // عدد جولات الإصلاح قبل التوقف
       "timeout_seconds": 300,           // أقصى مدة لأمر التحقق
       "work_method": true               // إرسال «طريقة العمل» (config/prompts/work_method.txt) مع كل تشغيل
+    },
+    // «👁 تجربة فعلية»: تشغيل البرنامج واستخدامه وأخذ صور بمراحله (مثل Claude). يحتاج: allinone install visual
+    "visual": {
+      "start_timeout": 90,              // ثوانٍ لانتظار جاهزية البرنامج بعد تشغيله
+      "max_pages": 4,                   // عدد الصفحات التي تُزار تلقائياً إن لم يُكتب سيناريو
+      "mobile": true,                   // صورة إضافية بحجم الهاتف
+      "model_tools": true,              // إعطاء النموذج أدوات المتصفح ليجرّب بنفسه أثناء العمل
+      // هل تُرسل الصور نفسها إلى النموذج الذي يعمل؟ "auto" = لـ Claude فقط (نماذج كثيرة نصية لا ترى الصور)
+      // أو true / false أو قائمة بوابات مثل ["claude", "omniroute"]
+      "model_sees_images": "auto",
+      // من يراجع الصور بعينه (رؤية ثانية): "auto" = Claude إن كان مسجّلاً، أو اسم بوابة، أو "off"
+      "reviewer": { "gateway": "auto", "model": "" },
+      "review_timeout": 360,
+      "python": "",                     // Python فيه Playwright (فارغ = بيئة Allinone)
+      "browser": ""                     // مسار Chrome/Edge (فارغ = اكتشاف تلقائي)
     }
   },
 

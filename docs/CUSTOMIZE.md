@@ -298,3 +298,14 @@ OmniRoute مثبت افتراضياً من npm، وهي حزمة جاهزة. ل�
 - `claude/hooks/verify_stop.py`: Stop hook يشغّل أمر التحقق عندما يحاول Claude Code الإنهاء. إذا فشل الأمر يرد بـ `{"decision":"block","reason":...}` فيكمل Claude Code العمل بالسبب كتعليمة تالية. لا يعمل إلا إذا ضبط Allinone `ALLINONE_VERIFY=1`، أي عند تفعيل الزر.
 - يمكنك تعديل `detect_command()` في الملف نفسه لتضيف أنواع مشاريع أخرى.
 - النصوص في `config/prompts/work_method.txt` و`verify_fix.txt` و`verify_change_approach.txt` و`verify_self_check.txt`.
+
+## «👁 تجربة فعلية»
+
+| الملف | ما يفعله |
+|---|---|
+| `claude/visual/visual_check.py` | يشغّل البرنامج، وينفّذ السيناريو، ويأخذ الصور، ويجمع الأخطاء (يُستدعى من Stop hook) |
+| `claude/visual/browser_lib.py` | اكتشاف أمر التشغيل، والمتصفح، والتقاط الشاشة، وقراءة الصفحة نصاً |
+| `claude/mcp/browser_server.py` | أدوات المتصفح التي يستخدمها النموذج أثناء العمل (`mcp__allinone_browser__*`) |
+| `config/prompts/visual_method.txt` · `visual_review.txt` · `visual_fix.txt` | ما يُقال للنموذج الذي يعمل، وللنموذج المراجع، وعند ظهور مشاكل |
+
+لإضافة نوع مشروع جديد عدّل `detect_app()`، ولإضافة خطوات سيناريو جديدة عدّل `Run.step()`.

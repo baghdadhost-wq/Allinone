@@ -14,6 +14,16 @@ from pathlib import Path
 
 from helpers import ROOT, Sandbox
 
+try:
+    import playwright.sync_api  # noqa: F401
+    import sys as _sys
+    _sys.path.insert(0, str(ROOT / "claude" / "visual"))
+    import browser_lib as _bl
+    VISUAL_BROWSER = _bl.find_browser() or ""
+    VISUAL_OK = True
+except ImportError:
+    VISUAL_BROWSER, VISUAL_OK = "", False
+
 from controller.config import Config
 from controller.context import Context
 from controller import gui, i18n
@@ -625,6 +635,90 @@ class GuiServerTests(unittest.TestCase):
         self.assertEqual(rec["env"]["ALLINONE_VERIFY_CMD"], "echo project-check")
         self.assertEqual(rec["stop_reasons"], [])                   # `echo` succeeds
 
+    # ------------------------------------------------------------- visual test (try the program for real)
+    def _site(self, with_logo=False):
+        site = self.sb.tmp / "site"
+        site.mkdir(exist_ok=True)
+        (site / "index.html").write_text(
+            '<!doctype html><html><head><meta charset="utf-8"><title>متجر</title></head><body>'
+            '<h1>مرحباً</h1><img src="logo.png"><button onclick="document.body.append(\'تمت\')">أضف</button>'
+            '<a href="about.html">عن</a></body></html>', encoding="utf-8")
+        (site / "about.html").write_text('<html><head><meta charset="utf-8"><title>عن</title></head><body>عن المتجر</body></html>',
+                                         encoding="utf-8")
+        pid = json.loads(self.call("/api/projects", {"name": "site", "folder": str(site)})[1])["project"]["id"]
+        return site, pid
+
+    def _visual_cfg(self, **kw):
+        cfg = {"reviewer": {"gateway": "off"}, "start_timeout": 30, "max_pages": 2}
+        cfg.update(kw)
+        self.app.ctx.cfg.data.setdefault("gui", {})["visual"] = cfg
+        self.app.ctx.cfg.data["gui"]["verify"] = {"max_rounds": 2}
+
+    @unittest.skipUnless(VISUAL_OK, "Playwright and a browser are needed")
+    def test_visual_test_runs_the_program_and_sends_problems_back(self):
+        self._visual_cfg()
+        site, pid = self._site()
+        from unittest import mock
+        with mock.patch.dict(os.environ, {"FAKE_FIX_FILE": str(site / "logo.png")}):
+            ev = self.chat(text="EDIT build the shop page FIX_ON_BLOCK", gateway="fake", project_id=pid, project="", visual=True)
+        rec = self.sb.read_record()
+        reasons = rec["stop_reasons"]
+        self.assertEqual(len(reasons), 1, json.dumps(self.of(ev, "saved")[0]["meta"].get("verify"), ensure_ascii=False)[:1500])
+        self.assertIn("جرّب Allinone البرنامج فعلياً", reasons[0])
+        self.assertIn("logo.png", reasons[0])                       # the missing image was found
+        self.assertIn("01-start", reasons[0])                      # screenshots are listed for the model
+        ver = self.of(ev, "saved")[0]["meta"]["verify"]
+        self.assertEqual(ver["visual_status"], "passed")
+        first, second = ver["visual"]
+        self.assertFalse(first["ok"])
+        self.assertTrue(second["ok"])
+        names = [s["name"] for s in first["shots"]]
+        self.assertIn("start", names)
+        self.assertIn("mobile", names)
+        self.assertTrue(any(n.startswith("page-") for n in names))  # visited a link by itself
+        for shot in first["shots"]:
+            self.assertTrue(Path(shot["path"]).is_file())
+        self.assertEqual(len(self.of(ev, "visual")), 2)               # the page sees each try live
+        self.assertIn("allinone_browser", rec["mcp"]["mcpServers"])    # browser tools for the model
+        self.assertEqual(rec["mcp"]["mcpServers"]["allinone_browser"]["env"]["ALLINONE_BROWSER_IMAGES"], "0")
+        argv = rec["argv"]
+        sys_prompt = Path(argv[argv.index("--append-system-prompt-file") + 1]).read_text(encoding="utf-8")
+        self.assertIn("جرّب البرنامج فعلياً", sys_prompt)
+        # screenshots are served to the page, nothing else is
+        url = f"/api/image?path={urllib.request.quote(first['shots'][0]['path'])}&t={self.app.token}"
+        self.assertEqual(self.call(url)[0], 200)
+        self.assertEqual(self.call(f"/api/image?path={urllib.request.quote(str(ROOT / 'README.md'))}")[0], 403)
+        conv_id = self.of(ev, "conversation")[0]["id"]
+        report = json.loads(self.call(f"/api/conversations/{conv_id}/report", {})[1])["text"]
+        self.assertIn("[تجربة البرنامج فعلياً] الجولة 1: ✘", report)
+        self.assertIn("📷 start:", report)
+
+    @unittest.skipUnless(VISUAL_OK, "Playwright and a browser are needed")
+    def test_visual_second_opinion_from_a_model_that_sees(self):
+        self._visual_cfg(reviewer={"gateway": "fake", "model": ""})
+        site, pid = self._site()
+        (site / "logo.png").write_bytes(b"")
+        ev = self.chat(text="EDIT the page REVIEW_FAIL", gateway="fake", project_id=pid, project="", visual=True)
+        rec = self.sb.read_record()
+        reasons = rec["stop_reasons"]
+        self.assertTrue(reasons)
+        self.assertIn("مراجعة الصور", reasons[0])
+        self.assertIn("زر «أضف» مخفي", reasons[0])
+        review = self.of(ev, "visual_review")[0]
+        self.assertEqual(review["verdict"], "problems")
+        review_prompt = Path(os.environ.get("FAKE_CLAUDE_RECORD") or self.sb.env["FAKE_CLAUDE_RECORD"]).with_name(
+            Path(self.sb.env["FAKE_CLAUDE_RECORD"]).name + ".review.txt").read_text(encoding="utf-8")
+        self.assertIn("REVIEW_FAIL", review_prompt)                   # the reviewer knows what was asked
+        self.assertIn("01-start.png", review_prompt)
+        self.assertEqual(self.of(ev, "saved")[0]["meta"]["verify"]["visual_status"], "failed")
+
+    def test_visual_not_installed_is_explained(self):
+        from unittest import mock
+        with mock.patch.object(gui.GuiApp, "visual_python", return_value=None):
+            ev = self.chat(text="EDIT x", gateway="fake", visual=True)
+        self.assertTrue(any("allinone install visual" in n["text"] for n in self.of(ev, "notice")))
+        self.assertNotIn("allinone_browser", self.sb.read_record()["mcp"]["mcpServers"])
+
 
 class VerifyHookTests(unittest.TestCase):
     def setUp(self):
@@ -647,6 +741,76 @@ class VerifyHookTests(unittest.TestCase):
         c = self.v.signature("Traceback...\nKeyError: 'name'")
         self.assertEqual(a, b)
         self.assertNotEqual(a, c)
+
+
+class VisualPieces(unittest.TestCase):
+    def test_parse_review(self):
+        self.assertEqual(gui.parse_review("looks fine\nVERDICT: OK"), ("ok", []))
+        v, probs = gui.parse_review("VERDICT: PROBLEMS\n- a.png: broken\n- b.png: cut text")
+        self.assertEqual((v, probs), ("problems", ["a.png: broken", "b.png: cut text"]))
+        self.assertEqual(gui.parse_review("no idea")[0], "unclear")
+
+    def test_detect_app(self):
+        import sys as _sys
+        import tempfile
+        _sys.path.insert(0, str(ROOT / "claude" / "visual"))
+        import browser_lib
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            self.assertIsNone(browser_lib.detect_app(t))
+            (t / "index.html").write_text("<h1>x</h1>")
+            self.assertIn("http.server", browser_lib.detect_app(t)["command"])
+            (t / "package.json").write_text('{"scripts": {"dev": "vite"}}')
+            self.assertEqual(browser_lib.detect_app(t)["command"], "npm run dev")
+            (t / "package.json").unlink()
+            (t / "index.html").unlink()
+            (t / "app.py").write_text("import tkinter\n")
+            self.assertEqual(browser_lib.detect_app(t)["kind"], "desktop")
+
+    @unittest.skipUnless(VISUAL_OK, "Playwright and a browser are needed")
+    def test_browser_tools_for_the_model(self):
+        import subprocess as sp
+        import sys as _sys
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            site = Path(tmp) / "site"
+            site.mkdir()
+            (site / "index.html").write_text('<html><head><meta charset="utf-8"><title>T</title></head><body>'
+                                             '<input id="q" placeholder="ابحث"><button onclick="document.getElementById(\'r\').textContent='
+                                             'document.getElementById(\'q\').value">بحث</button><p id="r"></p>'
+                                             '<script>console.error("boom")</script></body></html>', encoding="utf-8")
+            server = sp.Popen([_sys.executable, "-m", "http.server", "0", "--bind", "127.0.0.1", "--directory", str(site)],
+                              stdout=sp.PIPE, stderr=sp.STDOUT)
+            try:
+                line = server.stdout.readline().decode()
+                port = int(line.split("port ")[1].split()[0])
+                calls = [("browser_open", {"url": f"http://127.0.0.1:{port}/"}),
+                         ("browser_type", {"target": "#q", "text": "قهوة"}),
+                         ("browser_click", {"target": "بحث"}),
+                         ("browser_screenshot", {"name": "after search"}),
+                         ("browser_console", {}),
+                         ("browser_close", {})]
+                msgs = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18",
+                         "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}}},
+                        {"jsonrpc": "2.0", "method": "notifications/initialized"}]
+                msgs += [{"jsonrpc": "2.0", "id": i, "method": "tools/call", "params": {"name": n, "arguments": a}}
+                         for i, (n, a) in enumerate(calls, 2)]
+                env = dict(os.environ, ALLINONE_VISUAL_OUT=str(Path(tmp) / "shots"), ALLINONE_BROWSER_IMAGES="1",
+                           ALLINONE_BROWSER=VISUAL_BROWSER)
+                out = sp.run([_sys.executable, str(ROOT / "claude" / "mcp" / "browser_server.py")],
+                             input="".join(json.dumps(m) + "\n" for m in msgs).encode(), capture_output=True, env=env,
+                             timeout=120).stdout.decode()
+            finally:
+                server.kill()
+            replies = {r["id"]: r for r in map(json.loads, out.splitlines()) if r.get("id")}
+            text = lambda i: replies[i]["result"]["content"][0]["text"]  # noqa: E731
+            self.assertIn("ابحث", text(2) + text(3))                   # the page as text, with its fields
+            self.assertIn("#q", text(2))
+            self.assertIn("قهوة", text(4))                              # clicking showed the result
+            shot = replies[5]["result"]["content"]
+            self.assertEqual(shot[1]["type"], "image")                   # models that see get the picture
+            self.assertTrue(list((Path(tmp) / "shots").glob("*.png")))
+            self.assertIn("boom", text(6))                              # console errors are reported
 
 
 class TimingAnalysisTests(unittest.TestCase):
