@@ -149,7 +149,8 @@
     "port": 8787,                       // إن كان مشغولاً يُختار منفذ آخر تلقائياً
     // الصلاحية الافتراضية لـ Claude Code في الواجهة:
     // acceptEdits | auto | plan | bypassPermissions | default
-    "permission_mode": "acceptEdits"
+    "permission_mode": "acceptEdits",
+    "max_upload_mb": 200                // أكبر حجم لملف مرفق
   },
 
   // ----------------------------------------------- المهام غير التفاعلية (run / task)

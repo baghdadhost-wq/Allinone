@@ -10,7 +10,6 @@ pages cannot drive Claude Code on your computer.
 
 from __future__ import annotations
 
-import base64
 import json
 import os
 import re
@@ -36,7 +35,8 @@ WEB_DIR = Path(__file__).resolve().parent / "web"
 DEEP_PLACEHOLDER = "[ينقل السؤال هنا]"
 PERMISSION_MODES = ["acceptEdits", "auto", "plan", "bypassPermissions", "default"]
 EFFORTS = ["", "low", "medium", "high", "xhigh", "max"]
-MAX_UPLOAD = 25 * 1024 * 1024
+MAX_JSON = 2 * 1024 * 1024
+DEFAULT_UPLOAD_MB = 200
 
 
 # ------------------------------------------------------------ prompt building
@@ -178,6 +178,8 @@ class GuiApp:
         self.project = project or flows.resolve_project(ctx, None)
         self.lock = threading.Lock()
         self.runs: Dict[str, subprocess.Popen] = {}
+        self.run_gateways: Dict[str, str] = {}
+        self.httpd = None
         self.stopped: set = set()
         self.busy: set = set()
         self.started_gateways: set = set()
@@ -200,7 +202,8 @@ class GuiApp:
             st = gw.status()
             gws.append({"name": gw.name, "title": gw.title, "type": gw.type_name, "installed": st["installed"],
                         "up": st["up"], "url": gw.base_url, "default_model": gw.default_model(),
-                        "can_start": gw.type_name != "anthropic"})
+                        "can_start": gw.type_name != "anthropic" and (gw.can_start() or gw.install_mode() != "none"),
+                        "managed": bool(gw.managed_pid()) if gw.type_name != "anthropic" else False})
         claude = self.ctx.claude()
         last = self.ctx.state.get("last_gateway")
         names = [g["name"] for g in gws]
@@ -216,7 +219,27 @@ class GuiApp:
             "default_permission_mode": gui_cfg.get("permission_mode") or "acceptEdits",
             "efforts": EFFORTS,
             "deep_template": read_prompt(self.ctx, "deep_thinking.txt", ""),
+            "max_upload_mb": self.max_upload() // (1024 * 1024),
         }
+
+    def max_upload(self) -> int:
+        mb = (self.ctx.cfg.get("gui") or {}).get("max_upload_mb") or DEFAULT_UPLOAD_MB
+        return int(float(mb) * 1024 * 1024)
+
+    def stop_gateway(self, name: str) -> Dict[str, Any]:
+        gw = self.ctx.gateway(name)
+        with self.lock:
+            busy = name in self.run_gateways.values()
+        if busy:
+            return {"ok": False, "error": tr("A reply is still running through {t}. Stop it first.",
+                                             "ما زال هناك رد يعمل عبر {t}. أوقفه أولاً.", t=gw.title)}
+        if gw.stop():
+            self.started_gateways.discard(gw.name)
+            return {"ok": True}
+        if gw.is_up():
+            return {"ok": False, "error": tr("{t} is running but was not started by Allinone; stop it where it was started.",
+                                             "{t} يعمل لكنه لم يُشغَّل من Allinone؛ أوقفه من حيث شُغِّل.", t=gw.title)}
+        return {"ok": True}
 
     # ------------------------------------------------------------------ chat
     def build_prompt(self, conv_id: int, text: str, deep: bool, memory: bool, attachments: List[str]) -> str:
@@ -299,6 +322,7 @@ class GuiApp:
                                                            effort=effort or None)
             with self.lock:
                 self.runs[run_id] = proc
+                self.run_gateways[run_id] = gw.name
             err_tail: List[str] = []
 
             def _drain_err():
@@ -333,6 +357,7 @@ class GuiApp:
                 session.cleanup()
                 with self.lock:
                     self.runs.pop(run_id, None)
+                    self.run_gateways.pop(run_id, None)
             stopped = run_id in self.stopped
             if tr_.result is None:
                 msg = tr("Stopped.", "تم الإيقاف.") if stopped else "\n".join(err_tail[-15:]) or tr(
@@ -399,16 +424,11 @@ class GuiApp:
         return {"ok": res.returncode == 0, "text": res.stdout.decode("utf-8", "replace")[-500:]}
 
     # ------------------------------------------------------------- utilities
-    def save_upload(self, name: str, data_b64: str) -> str:
-        raw = base64.b64decode(data_b64.split(",", 1)[-1])
-        if len(raw) > MAX_UPLOAD:
-            raise ValueError(tr("File too large (max 25 MB).", "الملف كبير جداً (الحد 25 MB)."))
-        safe = re.sub(r"[^\w.\-]+", "_", Path(name).name, flags=re.UNICODE)[:80] or "file"
+    def upload_path(self, name: str) -> Path:
+        safe = re.sub(r"[^\w.\-]+", "_", Path(name.replace("\\", "/")).name, flags=re.UNICODE).strip("._")[:80] or "file"
         folder = self.uploads / time.strftime("%Y-%m-%d")
         folder.mkdir(parents=True, exist_ok=True)
-        path = folder / f"{time.strftime('%H%M%S')}-{secrets.token_hex(2)}-{safe}"
-        path.write_bytes(raw)
-        return str(path)
+        return folder / f"{time.strftime('%H%M%S')}-{secrets.token_hex(2)}-{safe}"
 
     def pick_folder(self, initial: str) -> Optional[str]:
         try:
@@ -477,9 +497,41 @@ def make_handler(app: GuiApp):
             self.end_headers()
             self.wfile.write(data)
 
+        def _discard(self, length: int) -> None:
+            """Read and drop a request body, so the browser gets our reply instead of a reset connection."""
+            while length > 0:
+                chunk = self.rfile.read(min(1 << 20, length))
+                if not chunk:
+                    break
+                length -= len(chunk)
+
+        def _upload(self, query: Dict[str, List[str]]) -> None:
+            length = int(self.headers.get("Content-Length") or 0)
+            name = (query.get("name") or ["file"])[0]
+            limit = app.max_upload()
+            if length > limit:
+                self._discard(length)
+                return self._json(413, {"error": tr("{n} is too large ({s} MB, limit {l} MB).",
+                                                    "الملف {n} كبير جداً ({s} MB، والحد {l} MB).", n=name,
+                                                    s=length // (1024 * 1024), l=limit // (1024 * 1024))})
+            path = app.upload_path(name)
+            remaining = length
+            with open(path, "wb") as fh:
+                while remaining > 0:
+                    chunk = self.rfile.read(min(1 << 20, remaining))
+                    if not chunk:
+                        break
+                    fh.write(chunk)
+                    remaining -= len(chunk)
+            if remaining:
+                path.unlink()
+                return self._json(400, {"error": tr("Upload of {n} was interrupted.", "انقطع رفع الملف {n}.", n=name)})
+            self._json(200, {"path": str(path), "size": length})
+
         def _body(self) -> Dict[str, Any]:
             length = int(self.headers.get("Content-Length") or 0)
-            if length > MAX_UPLOAD * 2:
+            if length > MAX_JSON:
+                self._discard(length)
                 raise ValueError("request too large")
             raw = self.rfile.read(length) if length else b"{}"
             data = json.loads(raw.decode("utf-8") or "{}")
@@ -560,8 +612,10 @@ def make_handler(app: GuiApp):
             g = self._guard()
             if g is None:
                 return
-            path, _ = g
+            path, query = g
             try:
+                if path == "/api/upload":
+                    return self._upload(query)
                 body = self._body()
                 if path == "/api/chat":
                     return self._chat(body)
@@ -570,7 +624,7 @@ def make_handler(app: GuiApp):
                 if path == "/api/gateway":
                     gw = app.ctx.gateway(body.get("name"))
                     if body.get("action") == "stop":
-                        return self._json(200, {"ok": gw.stop()})
+                        return self._json(200, app.stop_gateway(gw.name))
                     flows.ensure_installed(app.ctx, gw, False)
                     if gw.start() == "started":
                         app.started_gateways.add(gw.name)
@@ -586,9 +640,11 @@ def make_handler(app: GuiApp):
                     return self._json(200, app.login())
                 if path == "/api/logout":
                     return self._json(200, app.logout())
-                if path == "/api/upload":
-                    return self._json(200, {"path": app.save_upload(str(body.get("name") or "file"),
-                                                                    str(body.get("data") or ""))})
+                if path == "/api/shutdown":
+                    self._json(200, {"ok": True})
+                    if app.httpd is not None:
+                        threading.Thread(target=app.httpd.shutdown, daemon=True).start()
+                    return None
                 if path == "/api/memory":
                     mid = app.store().remember(str(body.get("text") or "")[:20000], tags=str(body.get("tags") or ""),
                                                source="gui")
@@ -658,6 +714,7 @@ def serve(ctx, port: int = 0, open_browser: bool = True, project: Optional[Path]
     httpd.daemon_threads = True
     real_port = httpd.server_address[1]
     app.allowed_hosts = {f"127.0.0.1:{real_port}", f"localhost:{real_port}"}
+    app.httpd = httpd
     url = f"http://127.0.0.1:{real_port}/#t={app.token}"
     ui.ok(tr("Allinone GUI is running: {u}", "واجهة Allinone تعمل على: {u}", u=url))
     ui.say(ui.dim(tr("Keep this window open. Press Ctrl+C to quit.", "أبقِ هذه النافذة مفتوحة. اضغط Ctrl+C للخروج.")))

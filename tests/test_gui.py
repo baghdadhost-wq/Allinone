@@ -37,7 +37,8 @@ class GuiServerTests(unittest.TestCase):
         threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
 
     def tearDown(self):
-        self.httpd.shutdown()
+        if not getattr(self, "_shut", False):
+            self.httpd.shutdown()
         self.httpd.server_close()
         self.app.shutdown()
         os.environ.clear()
@@ -45,7 +46,7 @@ class GuiServerTests(unittest.TestCase):
         self.sb.cleanup()
 
     # -------------------------------------------------------------- helpers
-    def call(self, path, body=None, method=None, token=True, host=None):
+    def call(self, path, body=None, method=None, token=True, host=None, timeout=60):
         req = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}",
                                      data=json.dumps(body).encode() if body is not None else None,
                                      method=method or ("POST" if body is not None else "GET"))
@@ -56,7 +57,7 @@ class GuiServerTests(unittest.TestCase):
             req.add_header("Host", host)
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         try:
-            with opener.open(req, timeout=60) as r:
+            with opener.open(req, timeout=timeout) as r:
                 return r.status, r.read()
         except urllib.error.HTTPError as e:
             return e.code, e.read()
@@ -174,10 +175,55 @@ class GuiServerTests(unittest.TestCase):
         saved = self.of(result["events"], "saved")[0]["meta"]
         self.assertTrue(saved["stopped"])
 
+    def upload(self, name, data):
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}/api/upload?name=" + urllib.request.quote(name),
+                                     data=data, method="POST")
+        req.add_header("X-Allinone-Token", self.app.token)
+        req.add_header("Content-Type", "application/octet-stream")
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        try:
+            with opener.open(req, timeout=60) as r:
+                return r.status, json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read())
+
+    def test_upload_limits(self):
+        big = os.urandom(3 * 1024 * 1024)
+        status, data = self.upload("big.bin", big)
+        self.assertEqual(status, 200)
+        self.assertEqual(Path(data["path"]).read_bytes(), big)  # raw bytes, nothing re-encoded
+        self.app.ctx.cfg.data.setdefault("gui", {})["max_upload_mb"] = 1
+        status, data = self.upload("فيديو.mp4", big)  # the server answers cleanly instead of dropping the connection
+        self.assertEqual(status, 413)
+        self.assertIn("فيديو.mp4", data["error"])
+        self.assertEqual(self.call("/api/state")[0], 200)  # still healthy afterwards
+
+    def test_gateway_power_and_shutdown(self):
+        ok = json.loads(self.call("/api/gateway", {"name": "fake", "action": "start"})[1])
+        self.assertTrue(ok["ok"])
+        state = json.loads(self.call("/api/state")[1])
+        fake = next(g for g in state["gateways"] if g["name"] == "fake")
+        self.assertTrue(fake["up"] and fake["managed"] and fake["can_start"])
+        claude = next(g for g in state["gateways"] if g["name"] == "claude")
+        self.assertFalse(claude["can_start"])
+        res = json.loads(self.call("/api/gateway", {"name": "fake", "action": "stop"})[1])
+        self.assertTrue(res["ok"])
+        self.assertFalse(next(g for g in json.loads(self.call("/api/state")[1])["gateways"] if g["name"] == "fake")["up"])
+        self.app.httpd = self.httpd
+        self.assertEqual(self.call("/api/shutdown", {})[0], 200)
+        for _ in range(50):
+            time.sleep(0.1)
+            try:
+                self.call("/api/state", timeout=1)
+            except OSError:
+                break
+        else:
+            self.fail("server did not shut down")
+        self._shut = True  # already stopped by /api/shutdown
+
     def test_uploads_and_conversations(self):
-        data = base64.b64encode("نص مرفق".encode()).decode()
-        status, raw = self.call("/api/upload", {"name": "../../evil name.txt", "data": "data:text/plain;base64," + data})
-        path = Path(json.loads(raw)["path"])
+        status, data = self.upload("../../evil name.txt", "نص مرفق".encode())
+        path = Path(data["path"])
         self.assertTrue(path.is_file())
         self.assertIn(str(self.ctx.data_dir / "uploads"), str(path))
         self.assertNotIn("..", path.name)
