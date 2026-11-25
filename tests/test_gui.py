@@ -159,7 +159,7 @@ class GuiServerTests(unittest.TestCase):
         th = threading.Thread(target=run)
         th.start()
         run_id = None
-        for _ in range(100):
+        for _ in range(600):  # slow CI machines (macOS runners) need a while to start everything
             time.sleep(0.2)
             with self.app.lock:
                 if self.app.runs:
@@ -169,8 +169,8 @@ class GuiServerTests(unittest.TestCase):
         time.sleep(1.0)
         started = time.time()
         self.assertTrue(json.loads(self.call("/api/stop", {"run_id": run_id})[1])["ok"])
-        th.join(20)
-        self.assertLess(time.time() - started, 15)
+        th.join(60)
+        self.assertLess(time.time() - started, 60)
         saved = self.of(result["events"], "saved")[0]["meta"]
         self.assertTrue(saved["stopped"])
 

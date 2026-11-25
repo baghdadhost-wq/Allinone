@@ -75,7 +75,7 @@ def stream(prompt, argv):
         emit({"type": "user", "message": {"content": [
             {"type": "tool_result", "tool_use_id": "toolu_1", "content": "File created", "is_error": False}]}})
     if "SLOW" in prompt:
-        time.sleep(30)
+        time.sleep(180)
     text = ask_gateway(prompt[-200:])
     emit({"type": "stream_event", "event": {"type": "message_start", "message": {"id": "m1"}}})
     emit({"type": "stream_event", "event": {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}})
