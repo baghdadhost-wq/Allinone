@@ -169,6 +169,23 @@ class EndToEnd(unittest.TestCase):
         self.assertIn("done", listing)
         self.assertNotIn("running", listing)
 
+    def test_claude_account_option_from_cli(self):
+        no = self.sb.run("run", "-g", "claude", "hi")
+        self.assertEqual(no.returncode, 1)
+        self.assertIn("allinone login", out(no))
+        auth_log = self.sb.tmp / "auth.jsonl"
+        login = self.sb.run("login", env={"FAKE_AUTH_LOG": str(auth_log)})
+        self.assertEqual(login.returncode, 0, out(login))
+        entry = json.loads(auth_log.read_text().splitlines()[-1])
+        self.assertEqual(entry["argv"], ["auth", "login"])
+        self.assertTrue(entry["config_dir"].endswith("claude-home"))
+        ok = self.sb.run("run", "-g", "claude", "hi", env={"FAKE_AUTH": "1", "ANTHROPIC_API_KEY": "sk-user"})
+        self.assertEqual(ok.returncode, 0, out(ok))
+        env = self.sb.read_record()["env"]
+        self.assertNotIn("ANTHROPIC_BASE_URL", env)
+        self.assertEqual(env.get("ANTHROPIC_API_KEY"), "sk-user")  # your own credentials stay available
+        self.assertEqual(self.sb.run("auth", env={"FAKE_AUTH": "1"}).returncode, 0)
+
     def test_doctor_and_help_do_not_crash(self):
         doc = self.sb.run("doctor")
         self.assertIn("Claude Code", out(doc))

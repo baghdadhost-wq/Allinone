@@ -122,6 +122,13 @@ def build_parser(gateway_names: List[str]) -> argparse.ArgumentParser:
     c.add_argument("action", choices=["save", "status", "diff"])
     c.add_argument("name")
 
+    gui = sub.add_parser("gui", help=tr("open the graphical interface", "فتح الواجهة الرسومية"))
+    gui.add_argument("--port", type=int, default=0)
+    gui.add_argument("--no-browser", action="store_true")
+    gui.add_argument("-p", "--project")
+    sub.add_parser("login", help=tr("sign in to your Anthropic (Claude) account", "تسجيل الدخول إلى حساب Claude"))
+    sub.add_parser("logout", help=tr("sign out of the Anthropic account", "تسجيل الخروج من حساب Claude"))
+    sub.add_parser("auth", help=tr("show the Claude account sign-in status", "عرض حالة تسجيل الدخول إلى Claude"))
     sub.add_parser("doctor", help=tr("check the installation", "فحص التثبيت"))
     lg = sub.add_parser("lang", help="ar | en")
     lg.add_argument("code", choices=list(i18n.SUPPORTED))
@@ -446,6 +453,29 @@ def main(argv: Optional[List[str]] = None) -> int:
                                           rebuild=a.rebuild, refresh=refresh) else 1
         if a.command == "customize":
             return cmd_customize(ctx, a)
+        if a.command == "gui":
+            from . import gui
+
+            flows.ensure_claude(ctx, ui.interactive())
+            return gui.serve(ctx, port=a.port, open_browser=not a.no_browser,
+                             project=flows.resolve_project(ctx, a.project))
+        if a.command in ("login", "logout"):
+            claude = ctx.claude()
+            flows.ensure_claude(ctx, ui.interactive())
+            gw = next((g for g in ctx.gateways().values() if g.type_name == "anthropic"), None)
+            from . import procs as _procs
+
+            return _procs.run_foreground(claude.auth_command(a.command), flows.resolve_project(ctx, None),
+                                         claude.base_env(gw))
+        if a.command == "auth":
+            st = ctx.claude().auth_status()
+            if st.get("loggedIn"):
+                who = st.get("email") or st.get("emailAddress") or ""
+                ui.ok(tr("Signed in ({m}){w}", "مسجّل الدخول ({m}){w}", m=st.get("authMethod", "?"),
+                         w=f" — {who}" if who else ""))
+                return 0
+            ui.warn(tr("Not signed in. Run: allinone login", "غير مسجّل الدخول. نفّذ: allinone login"))
+            return 1
         if a.command == "doctor":
             return 0 if installer.doctor(ctx) else 1
         if a.command == "lang":

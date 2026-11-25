@@ -62,6 +62,7 @@ def bring_up(ctx, gw: Gateway, interactive: bool) -> bool:
         if started:
             for note in gw.dashboard_notes():
                 ui.say(ui.dim("   " + note))
+        check_login(ctx, gw, interactive)
         check_key(ctx, gw, interactive)
         check_providers(ctx, gw, interactive)
     except BaseException:
@@ -70,6 +71,23 @@ def bring_up(ctx, gw: Gateway, interactive: bool) -> bool:
             gw.stop()
         raise
     return started
+
+
+def check_login(ctx, gw: Gateway, interactive: bool) -> None:
+    """For the direct Claude option: make sure Claude Code is signed in to an Anthropic account."""
+    if gw.type_name != "anthropic":
+        return
+    claude = ctx.claude()
+    if claude.auth_status().get("loggedIn"):
+        return
+    ui.warn(tr("Claude Code is not signed in to an Anthropic account yet.",
+               "Claude Code غير مسجّل الدخول إلى حساب Anthropic بعد."))
+    if not interactive:
+        raise GatewayError(tr("Sign in first with:  allinone login", "سجّل الدخول أولاً بالأمر:  allinone login"))
+    if ui.confirm(tr("Sign in now (opens your browser)?", "تسجيل الدخول الآن (سيفتح المتصفح)؟")):
+        from . import procs
+
+        procs.run_foreground(claude.auth_command("login"), Path.cwd(), claude.base_env(gw))
 
 
 def check_key(ctx, gw: Gateway, interactive: bool) -> None:

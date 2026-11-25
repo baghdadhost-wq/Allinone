@@ -1,0 +1,3 @@
+#!/usr/bin/env sh
+# Open the Allinone graphical interface (macOS / Linux).
+exec "$(cd "$(dirname "$0")" && pwd)/allinone" gui "$@"

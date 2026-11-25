@@ -193,7 +193,7 @@ class ClaudeRuntime:
             "gateway": gw.name,
             "gateway_title": gw.title,
             "gateway_url": gw.base_url,
-            "gateway_token": gw_env["ANTHROPIC_AUTH_TOKEN"],
+            "gateway_token": gw_env.get("ANTHROPIC_AUTH_TOKEN", ""),
             "model": gw_env.get("ANTHROPIC_MODEL", ""),
             "lang": i18n.language(),
             "session_dir": str(run_dir),
@@ -247,15 +247,50 @@ class ClaudeRuntime:
             args += ["--plugin-dir", str(d)]
         args += [str(a) for a in render(list(self.cfg.get("extra_args") or []), mapping, self.ctx.secrets)]
 
-        env = {k: v for k, v in os.environ.items()
-               if not k.startswith(STRIP_PREFIXES) and k not in STRIP_VARS}
+        env = self.base_env(gw)
         env.update(env_block)
+        return Session(cmd=[*cmd, *args], env=env, cwd=project, run_dir=run_dir,
+                       info={"model": mapping["model"], "servers": list(servers), "plugins": len(self.plugin_dirs())})
+
+    def base_env(self, gw: Optional[Gateway] = None) -> Dict[str, str]:
+        """The environment Claude Code starts with, before the gateway variables are added."""
+        keep = {"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"} if gw is not None and gw.keeps_user_credentials else set()
+        env = {k: v for k, v in os.environ.items()
+               if k in keep or (not k.startswith(STRIP_PREFIXES) and k not in STRIP_VARS)}
         if self.cfg.get("isolated_config", True):
             home = self.ctx.cfg.abs_path(self.cfg.get("config_dir") or (self.ctx.data_dir / "claude-home"))
             home.mkdir(parents=True, exist_ok=True)
             env["CLAUDE_CONFIG_DIR"] = str(home)
-        return Session(cmd=[*cmd, *args], env=env, cwd=project, run_dir=run_dir,
-                       info={"model": mapping["model"], "servers": list(servers), "plugins": len(self.plugin_dirs())})
+        return env
+
+    # ------------------------------------------------------- Anthropic account
+    def auth_status(self) -> Dict[str, Any]:
+        """`claude auth status` as a dict: {"loggedIn": bool, ...}."""
+        cmd = self.command()
+        if not cmd:
+            return {"loggedIn": False, "error": "not installed"}
+        try:
+            out = subprocess.run([*cmd, "auth", "status"], env=self.base_env(), stdout=subprocess.PIPE,
+                                 stderr=subprocess.STDOUT, timeout=60)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return {"loggedIn": False, "error": str(exc)}
+        text = out.stdout.decode("utf-8", "replace").strip()
+        data: Dict[str, Any] = {}
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                data = parsed
+        except ValueError:
+            data = {"text": text}
+        data["loggedIn"] = out.returncode == 0 and data.get("authMethod", "x") != "none"
+        return data
+
+    def auth_command(self, action: str = "login", extra: Optional[List[str]] = None) -> List[str]:
+        cmd = self.command()
+        if not cmd:
+            raise ClaudeError(tr("Claude Code is not installed. Run: allinone install claude",
+                                 "Claude Code غير مثبت. نفّذ: allinone install claude"))
+        return [*cmd, "auth", action, *(extra or [])]
 
     def run_interactive(self, gw: Gateway, model: Optional[str], project: Path, extra_args: List[str]) -> int:
         session = self.build_session(gw, model, project)
@@ -263,6 +298,25 @@ class ClaudeRuntime:
             return procs.run_foreground([*session.cmd, *extra_args], project, session.env)
         finally:
             session.cleanup()
+
+    def start_stream(self, gw: Gateway, model: Optional[str], project: Path, prompt: str,
+                     resume: Optional[str] = None, permission_mode: Optional[str] = None,
+                     allowed_tools: Optional[List[str]] = None, effort: Optional[str] = None):
+        """Start `claude -p --output-format stream-json`; returns (Popen, Session). Caller cleans up the session."""
+        session = self.build_session(gw, model, project)
+        args = print_args("stream-json", permission_mode, allowed_tools, 0, resume, effort)
+        kwargs: Dict[str, Any] = {}
+        if not IS_WINDOWS:
+            kwargs["start_new_session"] = True  # so Stop can end Claude Code and everything it started
+        proc = subprocess.Popen([*session.cmd, *args], cwd=str(project), env=session.env, stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kwargs)
+        assert proc.stdin is not None
+        try:
+            proc.stdin.write(prompt.encode("utf-8"))
+            proc.stdin.close()
+        except OSError:
+            pass
+        return proc, session
 
     def run_headless(self, gw: Gateway, model: Optional[str], project: Path, prompt: str,
                      resume: Optional[str] = None, permission_mode: Optional[str] = None,
@@ -302,6 +356,27 @@ class ClaudeRuntime:
         if result["is_error"] and not result["result"]:
             result["result"] = result["stderr"]
         return result
+
+
+def print_args(output: str = "json", permission_mode: Optional[str] = None,
+               allowed_tools: Optional[List[str]] = None, max_turns: int = 0, resume: Optional[str] = None,
+               effort: Optional[str] = None, model: Optional[str] = None) -> List[str]:
+    args = ["-p", "--output-format", output]
+    if output == "stream-json":
+        args += ["--verbose", "--include-partial-messages"]
+    if permission_mode:
+        args += ["--permission-mode", permission_mode]
+    if allowed_tools:
+        args += ["--allowedTools", ",".join(allowed_tools)]
+    if max_turns:
+        args += ["--max-turns", str(max_turns)]
+    if resume:
+        args += ["--resume", resume]
+    if effort:
+        args += ["--effort", effort]
+    if model:
+        args += ["--model", model]
+    return args
 
 
 def _parse_result(stdout: str) -> Optional[Dict[str, Any]]:

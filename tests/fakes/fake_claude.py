@@ -45,10 +45,62 @@ def call_mcp(spec, calls):
     return {"replies": replies, "stderr": err.decode()[-2000:]}
 
 
+def ask_gateway(prompt):
+    if not os.environ.get("ANTHROPIC_BASE_URL"):
+        return "claude-direct: " + prompt  # the Anthropic option: no gateway involved
+    req = urllib.request.Request(
+        os.environ["ANTHROPIC_BASE_URL"] + "/v1/messages",
+        data=json.dumps({"model": os.environ.get("ANTHROPIC_MODEL", "claude-x"), "max_tokens": 64,
+                         "messages": [{"role": "user", "content": prompt}]}).encode(),
+        headers={"Authorization": "Bearer " + os.environ.get("ANTHROPIC_AUTH_TOKEN", ""),
+                 "Content-Type": "application/json"})
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(req, timeout=30) as resp:
+        return json.loads(resp.read())["content"][0]["text"]
+
+
+def emit(obj):
+    sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+
+
+def stream(prompt, argv):
+    """Mimic `claude -p --output-format stream-json --verbose --include-partial-messages`."""
+    import time
+    sid = argv[argv.index("--resume") + 1] if "--resume" in argv else "sess-stream-1"
+    emit({"type": "system", "subtype": "init", "session_id": sid, "model": os.environ.get("ANTHROPIC_MODEL", "fake")})
+    if "USE_TOOL" in prompt:
+        emit({"type": "assistant", "message": {"id": "m0", "content": [
+            {"type": "tool_use", "id": "toolu_1", "name": "Write", "input": {"file_path": "hello.txt", "content": "hi"}}]}})
+        emit({"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "toolu_1", "content": "File created", "is_error": False}]}})
+    if "SLOW" in prompt:
+        time.sleep(30)
+    text = ask_gateway(prompt[-200:])
+    emit({"type": "stream_event", "event": {"type": "message_start", "message": {"id": "m1"}}})
+    emit({"type": "stream_event", "event": {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}})
+    for i in range(0, len(text), 7):
+        emit({"type": "stream_event", "event": {"type": "content_block_delta", "index": 0,
+                                                "delta": {"type": "text_delta", "text": text[i:i + 7]}}})
+    emit({"type": "assistant", "message": {"id": "m1", "content": [{"type": "text", "text": text}]}})
+    emit({"type": "result", "subtype": "success", "is_error": False, "result": text, "session_id": sid,
+          "num_turns": 1, "duration_ms": 9, "total_cost_usd": 0.0012})
+
+
 def main():
     argv = sys.argv[1:]
     if "--version" in argv:
         print("9.9.9 (Claude Code)")
+        return 0
+    if argv[:1] == ["auth"]:
+        log = os.environ.get("FAKE_AUTH_LOG")
+        if log:
+            with open(log, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps({"argv": argv, "config_dir": os.environ.get("CLAUDE_CONFIG_DIR")}) + "\n")
+        if argv[1:2] == ["status"]:
+            ok = os.environ.get("FAKE_AUTH") == "1"
+            print(json.dumps({"loggedIn": ok, "authMethod": "claude.ai" if ok else "none"}))
+            return 0 if ok else 1
         return 0
     record = {"argv": argv, "cwd": os.getcwd(),
               "env": {k: v for k, v in os.environ.items()
@@ -75,19 +127,14 @@ def main():
     record["mcp_results"] = {name: call_mcp(spec, calls) for name, spec in mcp["mcpServers"].items()
                              if spec.get("command")}
 
-    if "-p" in argv:
+    if "-p" in argv and "stream-json" in argv:
         prompt = sys.stdin.read()
         record["prompt"] = prompt
-        req = urllib.request.Request(
-            os.environ["ANTHROPIC_BASE_URL"] + "/v1/messages",
-            data=json.dumps({"model": os.environ.get("ANTHROPIC_MODEL", "claude-x"), "max_tokens": 64,
-                             "messages": [{"role": "user", "content": prompt}]}).encode(),
-            headers={"Authorization": "Bearer " + os.environ["ANTHROPIC_AUTH_TOKEN"],
-                     "Content-Type": "application/json"})
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        with opener.open(req, timeout=30) as resp:
-            reply = json.loads(resp.read())
-        text = reply["content"][0]["text"]
+        stream(prompt, argv)
+    elif "-p" in argv:
+        prompt = sys.stdin.read()
+        record["prompt"] = prompt
+        text = ask_gateway(prompt)
         print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": text,
                           "session_id": "sess-" + str(abs(hash(prompt)) % 10000), "num_turns": 1,
                           "duration_ms": 12, "total_cost_usd": 0}))

@@ -1,18 +1,20 @@
-# Allinone — Claude Code + OmniRoute + FreeLLMAPI
+# Allinone — Claude Code + OmniRoute + FreeLLMAPI + Claude
 
-برنامج واحد يثبّت ثلاثة مكونات ويربطها ببعض:
+برنامج واحد يثبّت المكونات ويربطها ببعض:
 
 - **Claude Code** هو أداة البرمجة التي تنفّذ المهام.
 - **OmniRoute** و**FreeLLMAPI** بوابتان توصلان Claude Code بنماذج مثل DeepSeek وGemini وQwen وغيرها.
+- **Claude** هو الخيار الثالث: Claude Code يتصل بـ Anthropic مباشرة بحسابك الأصلي.
 
-تختار عند كل تشغيل البوابة التي يأخذ منها Claude Code الأوامر. يدير ذلك كله **Python Controller** فيه قائمة ومهام وذاكرة، وكل جزء قابل للتعديل والإضافة.
+تختار عند كل تشغيل مصدر النموذج، من **واجهة رسومية** تشبه واجهة Claude أو من الطرفية، وClaude Code هو من ينفّذ في كل الحالات. يدير ذلك كله **Python Controller** فيه قائمة ومهام وذاكرة، وكل جزء قابل للتعديل والإضافة.
 
 ```mermaid
 flowchart TD
     A["Python Controller — allinone<br/>القائمة · المهام · الذاكرة · النتائج"] --> B["Claude Code<br/>مثبت محلياً داخل المشروع"]
-    B -- "Anthropic Messages API" --> C{"البوابة التي تختارها عند التشغيل"}
+    B -- "Anthropic Messages API" --> C{"ما تختاره عند التشغيل"}
     C --> D["OmniRoute<br/>127.0.0.1:20128"]
     C --> E["FreeLLMAPI<br/>127.0.0.1:3001"]
+    C --> G["Claude<br/>حسابك في Anthropic"]
     D --> F["DeepSeek · Gemini · Qwen · Groq · OpenRouter · ..."]
     E --> F
 ```
@@ -97,6 +99,10 @@ cd Allinone
 
 يعمل Claude Code على المجلد الذي شغّلت منه `allinone`، ويمكنك تغييره من القائمة بالحرف `p`، أو بالأمر `allinone start omniroute -p D:\my-project`.
 
+### أول مرة مع Claude (حسابك الأصلي)
+
+نفّذ `allinone login` (أو زر «تسجيل الدخول» في الواجهة)، وسجّل الدخول في المتصفح. يُحفظ تسجيل الدخول داخل Allinone (`data/claude-home`)، منفصلاً عن أي Claude Code آخر على جهازك. الاستهلاك يُحسب على اشتراكك أو رصيدك في Anthropic.
+
 ### أول مرة: أضف مزوّداً واحداً على الأقل
 
 البوابتان لا تملكان أي نموذج حتى تضيف مفتاح مزوّد واحد على الأقل، مثل Gemini أو Groq أو OpenRouter أو DeepSeek.
@@ -113,12 +119,38 @@ cd Allinone
 3. من صفحة **Keys** أضف مفاتيح المزودين، ورتّب **Fallback Chain** كما تريد.
 4. اختر FreeLLMAPI من القائمة. يقرأ Allinone المفتاح الموحّد `freellmapi-…` تلقائياً، فلا حاجة لنسخه.
 
+## الواجهة الرسومية
+
+```powershell
+.\gui.cmd              # Windows (أو انقر عليه مرتين)، أو: .\allinone.cmd gui
+./gui                  # macOS / Linux
+```
+
+تفتح في المتصفح على `127.0.0.1` (جهازك فقط) بواجهة تشبه Claude:
+
+- **اختيار المصدر من الأعلى**: OmniRoute أو FreeLLMAPI أو Claude، مع نقطة تبيّن الحالة (أخضر: جاهز، رمادي: متوقف، أحمر: غير مثبت، برتقالي: Claude غير مسجّل الدخول). Claude Code ينفّذ كل رسالة داخل مجلد المشروع في كل الحالات.
+- **🧠 التفكير بعمق**: يضع سؤالك داخل قالب التفكير العميق ويرسله. أنت ترى سؤالك فقط. القالب في `config/prompts/deep_thinking.txt` ويمكنك تعديله.
+- **📝 Memory**: يحفظ المحادثة كاملة في ملف txt (داخل `data/conversations/`) ويرسلها مع سؤالك، وأنت ترى سؤالك فقط. مفيد خصوصاً عند الانتقال من بوابة لأخرى داخل المحادثة نفسها.
+- **👁 إظهار النص المرسل**: يعرض النص الكامل الذي أُرسل فعلاً بدل سؤالك فقط.
+- **تسجيل الدخول إلى Claude**: اختر Claude ثم زر «تسجيل الدخول»، فتفتح نافذة تسجيل الدخول إلى حسابك (اشتراك Claude أو Anthropic Console).
+- **مميزات أخرى**:
+  - الردود تظهر أثناء كتابتها، مع زر إيقاف.
+  - بطاقات تعرض كل أداة يستخدمها Claude Code (تعديل ملف، أمر طرفية...) ونتيجتها.
+  - سجل محادثات مع بحث وإعادة تسمية وحذف وتصدير Markdown، والمحادثة تستمر في الجلسة نفسها.
+  - اختيار النموذج والجهد (effort) والصلاحيات لكل رسالة.
+  - إرفاق ملفات وصور، ونسخ الكود بزر، وحفظ أي رد في الذاكرة الدائمة.
+  - وضع ليلي ونهاري، وعربي وإنجليزي.
+
+> **الصلاحيات في الواجهة**: «تعديل الملفات تلقائياً» هو الافتراضي، وفيه تُرفض أوامر الطرفية إلا ما سمحت به في `tasks.allowed_tools`. «تلقائي ذكي» يقرر لكل أمر. «كل شيء بلا سؤال ⚠» يسمح بكل شيء، فاستخدمه في مجلد تثق به فقط.
+
 ## الأوامر
 
 | الأمر | الوظيفة |
 |---|---|
 | `allinone` | القائمة التفاعلية |
-| `allinone omniroute` / `allinone freellmapi` | تشغيل Claude Code مباشرة عبر بوابة |
+| `allinone gui` | الواجهة الرسومية |
+| `allinone omniroute` / `allinone freellmapi` / `allinone claude` | تشغيل Claude Code مباشرة في الطرفية |
+| `allinone login` / `logout` / `auth` | تسجيل الدخول إلى حساب Claude والخروج منه وعرض الحالة |
 | `allinone start freellmapi -m <model> -p <folder> -- --continue` | مع نموذج ومجلد، وما بعد `--` يذهب إلى Claude Code |
 | `allinone run "اكتب اختبارات لملف utils.py"` | تنفيذ مهمة بلا واجهة وحفظ النتيجة (`-g` لاختيار البوابة) |
 | `allinone run --resume 3 "أكمل"` | متابعة جلسة المهمة رقم 3 |
@@ -159,6 +191,8 @@ cd Allinone
 | Skills وأوامر وAgents | `claude/plugins/allinone/`، أو أي مجلد plugin جديد في `claude/plugins/` |
 | Hooks والصلاحيات وإعدادات Claude Code | `claude/settings.json` |
 | التعليمات التي يتلقاها Claude في بداية كل جلسة | `claude/context.md` |
+| قالب «التفكير بعمق» وقالب Memory في الواجهة | `config/prompts/` |
+| منفذ الواجهة وصلاحيتها الافتراضية | قسم `gui` في `config/allinone.jsonc` |
 | تعديل الكود المصدري لـ OmniRoute أو FreeLLMAPI | `runtime/<gateway>/`، ثم `allinone customize save`، وتُحفظ التعديلات في `customizations/` |
 | بوابة ثالثة (LiteLLM، claude-code-router، خادم آخر...) | قسم `gateways` في `config/allinone.jsonc` بالنوع `custom` |
 
@@ -166,9 +200,10 @@ cd Allinone
 
 ```
 allinone.py · allinone.cmd · allinone     نقطة التشغيل
+gui.cmd · gui                             الواجهة الرسومية
 install.cmd · install.ps1 · install.sh    المثبّتات
-controller/          Python Controller (القائمة، البوابات، Claude Code، المهام، الذاكرة)
-config/              الإعدادات (allinone.jsonc · mcp.jsonc · gateways/*.env)
+controller/          Python Controller (القائمة، البوابات، Claude Code، المهام، الذاكرة، الواجهة web/)
+config/              الإعدادات (allinone.jsonc · mcp.jsonc · gateways/*.env · prompts/)
 claude/              تخصيص Claude Code: settings.json · context.md · hooks/ · mcp/ · plugins/
 customizations/      تعديلاتك على كود البوابتين (ملفات patch)
 docs/                الشرح التفصيلي

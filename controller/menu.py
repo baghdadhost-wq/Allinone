@@ -27,14 +27,18 @@ def run_menu(ctx) -> int:
                 st = gw.status()
                 if gw.name == default_name:
                     default_idx = str(i)
-                state = ui.green("● " + tr("running", "يعمل")) if st["up"] else ui.dim("○ " + tr("stopped", "متوقف"))
+                if gw.type_name == "anthropic":
+                    state = ui.green("● " + tr("your account", "حسابك"))
+                else:
+                    state = ui.green("● " + tr("running", "يعمل")) if st["up"] else ui.dim("○ " + tr("stopped", "متوقف"))
                 extra = "" if st["installed"] else ui.yellow("  " + tr("(not installed)", "(غير مثبت)"))
-                ui.say(f"  {ui.bold(str(i))}) {ui.pad(gw.title, 12)} {ui.pad(state, 12)} {ui.dim(gw.base_url)}{extra}")
+                where = gw.base_url or "api.anthropic.com"
+                ui.say(f"  {ui.bold(str(i))}) {ui.pad(gw.title, 12)} {ui.pad(state, 12)} {ui.dim(where)}{extra}")
             print()
-            ui.say(ui.dim("  " + tr("p) project   d) dashboard   s) status   t) tasks   i) install/update   "
-                                    "l) language   q) quit",
-                                    "p) المشروع   d) لوحة التحكم   s) الحالة   t) المهام   i) تثبيت/تحديث   "
-                                    "l) اللغة   q) خروج")))
+            ui.say(ui.dim("  " + tr("g) graphical interface   p) project   d) dashboard   s) status   t) tasks   "
+                                    "i) install/update   l) language   q) quit",
+                                    "g) الواجهة الرسومية   p) المشروع   d) لوحة التحكم   s) الحالة   t) المهام   "
+                                    "i) تثبيت/تحديث   l) اللغة   q) خروج")))
             choice = ui.ask(tr("Choose a gateway for Claude Code", "اختر البوابة لـ Claude Code"), default_idx).lower()
 
             if choice in ("q", "quit", "exit", "0"):
@@ -46,6 +50,11 @@ def run_menu(ctx) -> int:
                     project = p.resolve()
                 else:
                     ui.error(tr("Folder not found: {p}", "المجلد غير موجود: {p}", p=p))
+                continue
+            if choice == "g":
+                from . import gui
+
+                gui.serve(ctx, project=project)
                 continue
             if choice == "s":
                 installer.doctor(ctx)

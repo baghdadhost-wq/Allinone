@@ -30,7 +30,13 @@ class GatewayTypes(unittest.TestCase):
 
     def test_shipped_config_lists_both_gateways(self):
         gws = self.ctx.gateways()
-        self.assertEqual(list(gws), ["omniroute", "freellmapi"])
+        self.assertEqual(list(gws), ["omniroute", "freellmapi", "claude"])
+        claude = gws["claude"]
+        self.assertEqual(claude.type_name, "anthropic")
+        self.assertEqual(claude.claude_env(), {})  # no gateway variables: Claude Code talks to Anthropic
+        self.assertEqual(claude.claude_env("opus"), {"ANTHROPIC_MODEL": "opus"})
+        self.assertEqual(claude.models(), ["sonnet", "opus", "haiku"])
+        self.assertTrue(claude.is_up())
         self.assertEqual(gws["omniroute"].base_url, "http://127.0.0.1:20128")
         self.assertEqual(gws["freellmapi"].base_url, "http://127.0.0.1:3001")
         self.assertEqual(gws["omniroute"].install_mode(), "npm")

@@ -6,6 +6,7 @@ memory  — notes that persist across sessions and gateways
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from pathlib import Path
@@ -30,6 +31,27 @@ CREATE TABLE IF NOT EXISTS tasks (
     exit_code   INTEGER
 );
 CREATE INDEX IF NOT EXISTS tasks_status ON tasks(status, id);
+CREATE TABLE IF NOT EXISTS conversations (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    created     REAL NOT NULL,
+    updated     REAL NOT NULL,
+    title       TEXT NOT NULL DEFAULT '',
+    gateway     TEXT,
+    model       TEXT,
+    project     TEXT,
+    session_id  TEXT,
+    session_gateway TEXT
+);
+CREATE TABLE IF NOT EXISTS messages (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    conv_id     INTEGER NOT NULL,
+    created     REAL NOT NULL,
+    role        TEXT NOT NULL,
+    display     TEXT NOT NULL DEFAULT '',
+    sent        TEXT NOT NULL DEFAULT '',
+    meta        TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS messages_conv ON messages(conv_id, id);
 CREATE TABLE IF NOT EXISTS memory (
     id      INTEGER PRIMARY KEY AUTOINCREMENT,
     created REAL NOT NULL,
@@ -120,3 +142,57 @@ class Store:
         cur = self.conn.execute("DELETE FROM memory WHERE id=?", (memory_id,))
         self.conn.commit()
         return cur.rowcount > 0
+
+    # ------------------------------------------------------ conversations (GUI)
+    def new_conversation(self, title: str, gateway: str, model: str, project: str) -> int:
+        now = time.time()
+        cur = self.conn.execute(
+            "INSERT INTO conversations(created, updated, title, gateway, model, project) VALUES (?,?,?,?,?,?)",
+            (now, now, title, gateway, model, project))
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def conversation(self, conv_id: int) -> Optional[sqlite3.Row]:
+        return self.conn.execute("SELECT * FROM conversations WHERE id=?", (conv_id,)).fetchone()
+
+    def conversations(self, limit: int = 200, query: str = "") -> List[sqlite3.Row]:
+        if query:
+            like = f"%{query}%"
+            return self.conn.execute(
+                "SELECT * FROM conversations WHERE title LIKE ? OR id IN "
+                "(SELECT conv_id FROM messages WHERE display LIKE ?) ORDER BY updated DESC LIMIT ?",
+                (like, like, limit)).fetchall()
+        return self.conn.execute("SELECT * FROM conversations ORDER BY updated DESC LIMIT ?", (limit,)).fetchall()
+
+    def update_conversation(self, conv_id: int, **fields: Any) -> None:
+        allowed = {"title", "gateway", "model", "project", "session_id", "session_gateway"}
+        sets = {k: v for k, v in fields.items() if k in allowed}
+        sets["updated"] = time.time()
+        cols = ", ".join(f"{k}=?" for k in sets)
+        self.conn.execute(f"UPDATE conversations SET {cols} WHERE id=?", (*sets.values(), conv_id))
+        self.conn.commit()
+
+    def delete_conversation(self, conv_id: int) -> None:
+        self.conn.execute("DELETE FROM messages WHERE conv_id=?", (conv_id,))
+        self.conn.execute("DELETE FROM conversations WHERE id=?", (conv_id,))
+        self.conn.commit()
+
+    def add_message(self, conv_id: int, role: str, display: str, sent: str = "", meta: Optional[Dict[str, Any]] = None) -> int:
+        cur = self.conn.execute(
+            "INSERT INTO messages(conv_id, created, role, display, sent, meta) VALUES (?,?,?,?,?,?)",
+            (conv_id, time.time(), role, display, sent or display, json.dumps(meta or {}, ensure_ascii=False)))
+        self.conn.execute("UPDATE conversations SET updated=? WHERE id=?", (time.time(), conv_id))
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def messages(self, conv_id: int) -> List[Dict[str, Any]]:
+        rows = self.conn.execute("SELECT * FROM messages WHERE conv_id=? ORDER BY id", (conv_id,)).fetchall()
+        out = []
+        for r in rows:
+            item = dict(r)
+            try:
+                item["meta"] = json.loads(r["meta"] or "{}")
+            except ValueError:
+                item["meta"] = {}
+            out.append(item)
+        return out

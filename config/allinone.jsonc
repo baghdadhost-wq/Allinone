@@ -98,7 +98,19 @@
       "token": ""
     },
 
-    // مثال لبوابة ثالثة (معطّل): أي خادم يتكلم Anthropic Messages API،
+    // Claude الأصلي: Claude Code يتصل بـ Anthropic مباشرة بحسابك (اشتراك Claude أو Console).
+    // سجّل الدخول مرة واحدة بالأمر: allinone login (أو زر «تسجيل الدخول» في الواجهة الرسومية)
+    "claude": {
+      "type": "anthropic",
+      "title": "Claude",
+      "enabled": true,
+      "models": ["sonnet", "opus", "haiku"],   // تظهر في قائمة النماذج، ويمكن كتابة اسم كامل
+      "claude": {
+        "model": ""                              // فارغ = النموذج الافتراضي لحسابك
+      }
+    },
+
+    // مثال لبوابة إضافية (معطّل): أي خادم يتكلم Anthropic Messages API،
     // سواء كان يعمل على هذا الجهاز أو على جهاز آخر
     "example-remote": {
       "enabled": false,
@@ -130,6 +142,14 @@
     "extra_plugin_dirs": [],
     "extra_args": [],                          // وسائط تضاف لكل تشغيل، مثل ["--permission-mode", "acceptEdits"]
     "env": {}                                  // متغيرات بيئة لكل الجلسات
+  },
+
+  // ------------------------------------------------------- الواجهة الرسومية (allinone gui)
+  "gui": {
+    "port": 8787,                       // إن كان مشغولاً يُختار منفذ آخر تلقائياً
+    // الصلاحية الافتراضية لـ Claude Code في الواجهة:
+    // acceptEdits | auto | plan | bypassPermissions | default
+    "permission_mode": "acceptEdits"
   },
 
   // ----------------------------------------------- المهام غير التفاعلية (run / task)

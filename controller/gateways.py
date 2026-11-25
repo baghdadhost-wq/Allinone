@@ -114,6 +114,7 @@ def package_version(pkg_dir: Path) -> Optional[str]:
 class Gateway:
     type_name = "custom"
     no_auth_token = NO_AUTH_TOKEN
+    keeps_user_credentials = False  # True only for the direct Anthropic connection
     DEFAULTS: Dict[str, Any] = {
         "host": "127.0.0.1",
         "health_path": "/",
@@ -609,8 +610,76 @@ class FreeLLMAPIGateway(Gateway):
                "أضف مفاتيح المزودين من صفحة Keys؛ يقرأ Allinone المفتاح الموحد تلقائياً."),
         ]
 
+# ------------------------------------------------------------ Claude (Anthropic)
+class AnthropicGateway(Gateway):
+    """The original Claude: Claude Code talks to Anthropic directly with your own account.
 
-TYPES = {"omniroute": OmniRouteGateway, "freellmapi": FreeLLMAPIGateway, "custom": Gateway}
+    Nothing to install or start. Sign in once with `allinone login` (or /login inside
+    Claude Code); the login is stored in Allinone's own Claude Code config folder.
+    """
+
+    type_name = "anthropic"
+    keeps_user_credentials = True
+    DEFAULTS = deep_merge(Gateway.DEFAULTS, {
+        "title": "Claude",
+        "dashboard_path": "",
+        "models": ["sonnet", "opus", "haiku"],
+        "claude": {"model": "", "tiers_follow_model": False},
+    })
+
+    @property
+    def base_url(self) -> str:
+        return ""
+
+    def is_local(self) -> bool:
+        return False
+
+    def is_installed(self) -> bool:
+        return self.ctx.claude().is_installed()
+
+    def installed_version(self) -> Optional[str]:
+        return self.ctx.claude().installed_version()
+
+    def install(self, force: bool = False, latest: bool = False, rebuild: bool = False, refresh: bool = False) -> None:
+        self.ctx.claude().install(force=force or refresh, latest=latest)
+
+    def is_up(self) -> bool:
+        return True
+
+    def can_start(self) -> bool:
+        return False
+
+    def start(self) -> str:
+        return "already"
+
+    def stop(self) -> bool:
+        return False
+
+    def token(self) -> str:
+        return ""
+
+    def models(self) -> Optional[List[str]]:
+        return [str(m) for m in (self.cfg.get("models") or [])]
+
+    def dashboard_url(self) -> str:
+        return str(self.cfg.get("dashboard_url") or "https://claude.ai/settings/usage")
+
+    def dashboard_notes(self) -> List[str]:
+        return [tr("Uses your Anthropic account. Sign in with:  allinone login",
+                   "يستخدم حسابك في Anthropic. سجّل الدخول بالأمر:  allinone login")]
+
+    def claude_env(self, model: Optional[str] = None) -> Dict[str, str]:
+        env: Dict[str, str] = {}
+        main = (model if model is not None else self.default_model()).strip()
+        if main:
+            env["ANTHROPIC_MODEL"] = main
+        for key, value in (self.claude_cfg().get("env") or {}).items():
+            env[str(key)] = str(self.render(str(value)))
+        return env
+
+
+TYPES = {"omniroute": OmniRouteGateway, "freellmapi": FreeLLMAPIGateway, "anthropic": AnthropicGateway,
+         "custom": Gateway}
 
 
 def make_gateway(name: str, cfg: Dict[str, Any], ctx) -> Gateway:
