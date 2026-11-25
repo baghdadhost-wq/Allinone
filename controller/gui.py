@@ -110,6 +110,7 @@ TIME_CATS = [
     ("model_wait", "انتظار النموذج/البوابة حتى أول حرف من الرد (بين الأوامر)", "wait"),
     ("generation", "كتابة النموذج للرد أو الكود (عمل)", "work"),
     ("tools", "تنفيذ الأوامر والأدوات (عمل)", "work"),
+    ("verify", "تحقق Allinone الآلي (تشغيل الاختبارات)", "work"),
     ("approval", "انتظار إذنك", "user"),
     ("finishing", "إنهاء الجلسة", "wait"),
 ]
@@ -150,9 +151,18 @@ def analyze_timing(meta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     tools: Dict[str, Dict[str, Any]] = {}
     names = {p.get("id"): p.get("name") for p in meta.get("parts") or [] if p.get("kind") == "tool"}
 
+    checks = [(c["start"] - t0, c["end"] - t0) for c in (meta.get("verify") or {}).get("checks") or []
+              if c.get("start") and c.get("end")]
+
     def add(cat: str, a: float, b: float) -> None:
         if b <= a:
             return
+        ov_v = sum(max(0.0, min(b, y) - max(a, x)) for x, y in checks)
+        if ov_v:
+            cats["verify"] += ov_v
+            b -= ov_v  # the rest of the span keeps its category
+            if b <= a:
+                return
         if cat == "tools":
             ov = sum(max(0.0, min(b, y) - max(a, x)) for x, y in asks)
             cats["approval"] += ov
@@ -351,6 +361,21 @@ def build_report_text(conv: Dict[str, Any], messages: List[Dict[str, Any]], head
                 if a.get("t_done") and not a.get("auto"):
                     when += f" · رُدّ {_clock(a['t_done'])} (انتظار {_dur(a['t_done'] - a['t_ask'])})"
             out.append(f"[إذن] {a.get('tool')}: {state}{' (إذن مسبق)' if a.get('auto') else ''}{when}")
+        ver = meta.get("verify")
+        if ver:
+            names_v = {"passed": "✔ نجح التحقق", "failed": "✘ فشل التحقق بعد كل الجولات", "fixing": "✘ آخر تحقق فشل",
+                       "self": "🔎 طُلب من النموذج أن يجرّب بنفسه (لا يوجد أمر تحقق)", "skipped": "لم تتغير ملفات؛ لا حاجة للتحقق",
+                       "none": "لم يُشغَّل تحقق"}
+            out.append(f"[تحقق آلي] {names_v.get(ver.get('status'), ver.get('status'))}"
+                       f"{' · الأمر: ' + ver['cmd'] if ver.get('cmd') else ''}")
+            for c in ver.get("checks") or []:
+                ok = c.get("code") == 0
+                out.append(f"  الجولة {c.get('round')}: {'✔' if ok else '✘'} رمز الخروج {c.get('code')} ⏱ "
+                           f"{_clock(c.get('start'))} ← {_clock(c.get('end'))} ({_dur((c.get('end') or 0) - (c.get('start') or 0))})")
+                if not ok:
+                    out.append("    " + _clip(c.get("output") or "", 1500).replace("\n", "\n    "))
+                    errors.append(f"الدور {turn}: فشل التحقق الآلي ({c.get('cmd')})، الجولة {c.get('round')}: "
+                                  + _clip(c.get("output") or "", 400))
         if tm:
             out += ["", "  تحليل الوقت لهذا الرد:"]
             for key, label, _ in TIME_CATS:
@@ -554,6 +579,13 @@ def build_handoff_text(conv: Dict[str, Any], messages: List[Dict[str, Any]], rea
         out += ["", "## آخر الأوامر المنفّذة"] + [f"- {c}" for c in commands[-25:]]
     if errors:
         out += ["", "## آخر الأخطاء"] + [f"- {e}" for e in errors[-10:]]
+    last_ver = next(((m.get("meta") or {}).get("verify") for m in reversed(messages)
+                     if m["role"] == "assistant" and (m.get("meta") or {}).get("verify")), None)
+    if last_ver and last_ver.get("checks"):
+        c = last_ver["checks"][-1]
+        out += ["", "## آخر تحقق آلي", f"- {'✔ نجح' if c.get('code') == 0 else '✘ فشل'}: {c.get('cmd')}"]
+        if c.get("code") != 0:
+            out.append(_clip(c.get("output") or "", 1500))
     if last_text:
         out += ["", "## آخر ما كتبه المساعد", _clip(last_text, 3000)]
     return "\n".join(out) + "\n"
@@ -1012,6 +1044,9 @@ class GuiApp:
         effort = effort if effort in EFFORTS else ""
         allowed = list((self.ctx.cfg.get("tasks") or {}).get("allowed_tools") or [])
         tr_.mark("gateway_ready")
+        verify = bool(req.get("verify"))
+        verify_state = self.ctx.data_dir / "verify" / f"{run_id}.json"
+        seen_checks = 0
         # The reply is stored right away and updated while it streams, so nothing is lost if Allinone
         # or the computer stops in the middle.
         base_meta["started_at"] = tr_.started
@@ -1031,7 +1066,8 @@ class GuiApp:
             proc, session = self.ctx.claude().start_stream(gw, model, project, sent, resume=resume,
                                                            permission_mode=mode, allowed_tools=allowed,
                                                            effort=effort or None, approval=approval,
-                                                           extra_args=self.run_extra_args(project_id))
+                                                           extra_args=self.run_extra_args(project_id, verify),
+                                                           extra_env=self.verify_env(project_id, run_id) if verify else None)
             tr_.mark("launch")
             with self.lock:
                 self.runs[run_id] = proc
@@ -1061,6 +1097,8 @@ class GuiApp:
                             # remember the session at once: a crash later can still be resumed from it
                             store.update_conversation(conv_id, session_id=tr_.session_id, session_gateway=gw.name,
                                                       gateway=gw.name, model=model or "")
+                        if verify and time.time() - last_save > 0.5:
+                            seen_checks = self._emit_verify(verify_state, seen_checks, emit)
                         if out["type"] in ("tool_result", "tool_use") or time.time() - last_save > 2:
                             store.update_message(mid, tr_.final_text(), {**base_meta, "running": True, "parts": tr_.parts,
                                                                          "timeline": tr_.timeline})
@@ -1101,6 +1139,14 @@ class GuiApp:
         if tr_.session_id:
             store.update_conversation(conv_id, session_id=tr_.session_id, session_gateway=gw.name,
                                       gateway=gw.name, model=model or "")
+        verify_info = None
+        if verify:
+            self._emit_verify(verify_state, seen_checks, emit)
+            verify_info = self._read_verify(verify_state)
+            try:
+                verify_state.unlink()
+            except OSError:
+                pass
         diag = None
         if stopped or tr_.result.get("is_error"):
             detail = "\n".join([str(tr_.result.get("result") or ""), *err_tail[-15:]])
@@ -1112,11 +1158,35 @@ class GuiApp:
                 "ended_at": time.time(),
                 "model": model or tr_.model or gw.default_model(), "stopped": stopped, "approvals": approvals,
                 **{k: tr_.result.get(k) for k in ("cost_usd", "duration_ms", "num_turns", "is_error")}}
+        if verify_info:
+            meta["verify"] = verify_info
         if diag:
             meta["interrupted"] = diag
         store.update_message(mid, tr_.final_text(), meta)
         emit({"type": "saved", "message_id": mid, "meta": meta})
         return diag
+
+    @staticmethod
+    def _read_verify(path: Path) -> Optional[Dict[str, Any]]:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        checks = [{k: c.get(k) for k in ("round", "cmd", "code", "start", "end")} | {"output": _clip(c.get("output") or "", 3000)}
+                  for c in data.get("checks") or []]
+        return {"status": data.get("status") or "none", "cmd": data.get("cmd") or "", "checks": checks}
+
+    def _emit_verify(self, path: Path, seen: int, emit) -> int:
+        """Tell the page about each automatic check as soon as the Stop hook has run it."""
+        info = self._read_verify(path) if path.exists() else None
+        if not info:
+            return seen
+        for c in info["checks"][seen:]:
+            emit({"type": "verify", "check": {**c, "output": c["output"][-1500:]}, "status": info["status"]})
+        if info["status"] == "self" and seen == 0 and not info["checks"]:
+            emit({"type": "verify", "check": None, "status": "self"})
+            return 10 ** 9  # announced once; there is no command, so no checks will follow
+        return max(seen, len(info["checks"]))
 
     def live_state(self, conv_id: int) -> Dict[str, Any]:
         """For a page that (re)opens a conversation while its reply is still running."""
@@ -1315,10 +1385,31 @@ class GuiApp:
         data["conversations"] = [dict(r) for r in store.conversations(project_id=project_id)]
         return data
 
-    def run_extra_args(self, project_id: Optional[int]) -> List[str]:
-        """Folders Claude Code may read besides the working folder, plus the project's instructions."""
+    def verify_cfg(self) -> Dict[str, Any]:
+        cfg = (self.ctx.cfg.get("gui") or {}).get("verify") or {}
+        return {"command": str(cfg.get("command") or ""), "auto_detect": cfg.get("auto_detect", True),
+                "max_rounds": int(cfg.get("max_rounds", 3)), "timeout_seconds": float(cfg.get("timeout_seconds", 300)),
+                "work_method": cfg.get("work_method", True)}
+
+    def verify_env(self, project_id: Optional[int], run_id: str) -> Dict[str, str]:
+        cfg = self.verify_cfg()
+        proj = self.store().project(project_id) if project_id else None
+        cmd = (proj["verify_command"] if proj is not None and proj["verify_command"] else "") or cfg["command"]
+        state = self.ctx.data_dir / "verify" / f"{run_id}.json"
+        state.parent.mkdir(parents=True, exist_ok=True)
+        return {"ALLINONE_VERIFY": "1", "ALLINONE_VERIFY_CMD": cmd.strip(),
+                "ALLINONE_VERIFY_DETECT": "1" if cfg["auto_detect"] else "0",
+                "ALLINONE_VERIFY_ROUNDS": str(cfg["max_rounds"]), "ALLINONE_VERIFY_TIMEOUT": str(cfg["timeout_seconds"]),
+                "ALLINONE_VERIFY_STATE": str(state)}
+
+    def run_extra_args(self, project_id: Optional[int], verify: bool = False) -> List[str]:
+        """Folders Claude Code may read besides the working folder, plus instructions to append to its system
+        prompt: the work method (verify & fix) and the project's instructions."""
         dirs = [self.uploads, self.reports, self.transcripts]
         args: List[str] = []
+        sections: List[str] = []
+        if verify and self.verify_cfg()["work_method"]:
+            sections.append(read_prompt(self.ctx, "work_method.txt", "").strip())
         proj = self.store().project(project_id) if project_id else None
         if proj is not None:
             files = self.store().project_files(project_id)
@@ -1331,9 +1422,14 @@ class GuiApp:
             if files:
                 lines += ["", "## ملفات معرفة المشروع (اقرأ منها ما يلزم قبل الإجابة)"]
                 lines += [f"- {f['name']}: {f['path']}" for f in files]
-            prompt_file = self.projects_dir / str(project_id) / "system-prompt.md"
+            sections.append("\n".join(lines))
+        sections = [x for x in sections if x]
+        if sections:
+            # one file: Claude Code takes a single --append-system-prompt-file
+            folder = self.projects_dir / str(project_id) if proj is not None else self.ctx.data_dir / "system-prompts"
+            prompt_file = folder / ("system-prompt-verify.md" if verify else "system-prompt.md")
             prompt_file.parent.mkdir(parents=True, exist_ok=True)
-            prompt_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            prompt_file.write_text("\n\n".join(sections) + "\n", encoding="utf-8")
             args += ["--append-system-prompt-file", str(prompt_file)]
         for d in dirs:
             d.mkdir(parents=True, exist_ok=True)

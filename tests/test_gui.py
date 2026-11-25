@@ -12,7 +12,7 @@ import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
-from helpers import Sandbox
+from helpers import ROOT, Sandbox
 
 from controller.config import Config
 from controller.context import Context
@@ -556,6 +556,97 @@ class GuiServerTests(unittest.TestCase):
                        "[نص الرد] ⏱ صدر:", "تحليل الوقت لهذا الرد:", "انتظار النموذج/البوابة حتى أول حرف",
                        "⇐ الحكم:", "ملخص التوقيت", "أطول فترات الانتظار بين الأوامر"):
             self.assertIn(needle, text)
+
+    # ------------------------------------------------------------- verify & fix
+    def _verify_cfg(self, **kw):
+        import sys
+        cfg = {"command": f'"{sys.executable}" -c "import os,sys; sys.exit(0 if os.path.exists(\'fixed.txt\') else 1)"',
+               "max_rounds": 3, "auto_detect": False}
+        cfg.update(kw)
+        self.app.ctx.cfg.data.setdefault("gui", {})["verify"] = cfg
+        fixed = self.sb.project / "fixed.txt"
+        self.addCleanup(lambda: fixed.exists() and fixed.unlink())
+
+    def test_verify_fails_then_model_fixes_it(self):
+        self._verify_cfg()
+        from unittest import mock
+        with mock.patch.dict(os.environ, {"FAKE_FIX_AFTER": "1"}):
+            ev = self.chat(text="EDIT the code FIX_ON_BLOCK", gateway="fake", verify=True)
+        rec = self.sb.read_record()
+        reasons = rec["stop_reasons"]
+        self.assertEqual(len(reasons), 2)                       # two failed checks sent back, then it passed
+        self.assertIn("وفشل التحقق", reasons[0])
+        self.assertIn("المحاولة 1 من 3", reasons[0])
+        self.assertNotIn("الطريقة الحالية لم تنجح", reasons[0])
+        self.assertIn("الطريقة الحالية لم تنجح", reasons[1])     # same error again -> change the approach
+        meta = self.of(ev, "saved")[0]["meta"]
+        self.assertEqual(meta["verify"]["status"], "passed")
+        self.assertEqual([c["code"] for c in meta["verify"]["checks"]], [1, 1, 0])
+        self.assertEqual(len(self.of(ev, "verify")), 3)          # the page sees every check live
+        argv = rec["argv"]
+        sys_prompt = Path(argv[argv.index("--append-system-prompt-file") + 1]).read_text(encoding="utf-8")
+        self.assertIn("طريقة العمل", sys_prompt)
+        conv_id = self.of(ev, "conversation")[0]["id"]
+        text = json.loads(self.call(f"/api/conversations/{conv_id}/report", {})[1])["text"]
+        self.assertIn("[تحقق آلي] ✔ نجح التحقق", text)
+        self.assertIn("الجولة 1: ✘ رمز الخروج 1", text)
+        self.assertIn("الجولة 3: ✔", text)
+
+    def test_verify_gives_up_after_max_rounds(self):
+        import sys
+        self._verify_cfg(command=f'"{sys.executable}" -c "import sys; print(\'Error: boom\'); sys.exit(2)"', max_rounds=2)
+        ev = self.chat(text="EDIT it", gateway="fake", verify=True)
+        self.assertEqual(len(self.sb.read_record()["stop_reasons"]), 2)
+        ver = self.of(ev, "saved")[0]["meta"]["verify"]
+        self.assertEqual(ver["status"], "failed")
+        self.assertEqual(len(ver["checks"]), 3)
+        self.assertIn("Error: boom", ver["checks"][0]["output"])
+
+    def test_verify_without_command_asks_model_to_test_itself(self):
+        self._verify_cfg(command="")
+        ev = self.chat(text="EDIT something", gateway="fake", verify=True)
+        reasons = self.sb.read_record()["stop_reasons"]
+        self.assertEqual(len(reasons), 1)
+        self.assertIn("تحقق بنفسك", reasons[0])
+        self.assertEqual(self.of(ev, "saved")[0]["meta"]["verify"]["status"], "self")
+        # a question that changed no files is not checked
+        self.chat(text="just a question", gateway="fake", verify=True)
+        self.assertEqual(self.sb.read_record()["stop_reasons"], [])
+
+    def test_verify_off_and_project_command(self):
+        self._verify_cfg()
+        self.chat(text="EDIT x", gateway="fake")
+        rec = self.sb.read_record()
+        self.assertEqual(rec["stop_reasons"], [])
+        self.assertNotIn("ALLINONE_VERIFY", rec["env"])
+        pid = json.loads(self.call("/api/projects", {"name": "p", "verify_command": "echo project-check"})[1])["project"]["id"]
+        self.chat(text="EDIT y", gateway="fake", project_id=pid, verify=True)
+        rec = self.sb.read_record()
+        self.assertEqual(rec["env"]["ALLINONE_VERIFY_CMD"], "echo project-check")
+        self.assertEqual(rec["stop_reasons"], [])                   # `echo` succeeds
+
+
+class VerifyHookTests(unittest.TestCase):
+    def setUp(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("verify_stop", ROOT / "claude" / "hooks" / "verify_stop.py")
+        self.v = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.v)
+
+    def test_detects_python_tests(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(self.v.detect_command(Path(tmp)))
+            (Path(tmp) / "tests").mkdir()
+            cmd = self.v.detect_command(Path(tmp))
+            self.assertTrue("pytest" in cmd or "unittest" in cmd, cmd)
+
+    def test_same_error_is_recognised(self):
+        a = self.v.signature("Traceback...\nFile /a/b.py, line 12\nValueError: bad value 3")
+        b = self.v.signature("Traceback...\nFile /c/d.py, line 40\nValueError: bad value 7")
+        c = self.v.signature("Traceback...\nKeyError: 'name'")
+        self.assertEqual(a, b)
+        self.assertNotEqual(a, c)
 
 
 class TimingAnalysisTests(unittest.TestCase):

@@ -157,6 +157,11 @@ main{flex:1;display:flex;flex-direction:column;min-width:0}
 .modal .mbtns{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 .modal .muted{color:var(--muted);font-size:12.5px}
 @media (max-width:760px){.pgrid{grid-template-columns:1fr}}
+.vbadge code{direction:ltr;unicode-bidi:isolate}
+.vbadge{display:inline-block;max-width:100%;overflow-wrap:anywhere;margin:8px 0 2px;padding:3px 10px;border-radius:14px;font-size:12.5px;border:1px solid var(--line);color:var(--muted)}
+.vbadge.ok{border-color:var(--ok);color:var(--ok);background:rgba(63,143,91,.08)}
+.vbadge.bad{border-color:var(--err);color:var(--err);background:rgba(192,57,43,.06)}
+pre.vout{white-space:pre-wrap;direction:ltr;text-align:left;max-height:200px;overflow:auto;font-size:12px}
 .intr{border:1px solid var(--warn);background:rgba(192,138,28,.08);border-radius:12px;padding:10px 12px;margin:10px 0;font-size:14px}
 .intr .ih{font-weight:600;margin-bottom:4px}
 .intr .ia{color:var(--muted);margin-bottom:8px}
@@ -207,6 +212,7 @@ main{flex:1;display:flex;flex-direction:column;min-width:0}
           <button class="btn small ghost" id="attachBtn" title="">📎</button>
           <input type="file" id="fileInput" multiple hidden>
           <button class="btn small ghost" id="answerBtn">📥</button>
+          <label class="toggle" id="tVerify"><input type="checkbox" id="verify">🔁 <span data-i="verify"></span></label>
           <label class="toggle" id="tDeep"><input type="checkbox" id="deep">🧠 <span data-i="deep"></span></label>
           <label class="toggle" id="tMemory"><input type="checkbox" id="memory">📝 <span>Memory</span></label>
           <label class="toggle" id="tSent"><input type="checkbox" id="showSent">👁 <span data-i="showSent"></span></label>
@@ -226,6 +232,10 @@ main{flex:1;display:flex;flex-direction:column;min-width:0}
 "use strict";
 const I18N = {
   ar: {newChat:"+ محادثة جديدة", search:"بحث في المحادثات", model:"النموذج", effort:"الجهد", perm:"الصلاحيات",
+    verify:"تحقق وأصلح", verifyTip:"Allinone يجرّب النتيجة عندما يقول النموذج إنه انتهى (اختبارات/بناء)؛ إذا فشلت يعيد الخطأ إليه ليصلحه ويغيّر الأسلوب إن تكرر، ثم يتحقق من جديد",
+    vRound:"🔁 تحقق آلي (الجولة {n})", vPass:"✔ نجح", vFail:"✘ فشل (رمز {code}) — أُعيد الخطأ إلى النموذج ليصلحه", vSelf:"🔎 لا يوجد أمر تحقق؛ طُلب من النموذج أن يجرّب النتيجة بنفسه",
+    vBadge:{passed:"✔ تم التحقق", failed:"✘ فشل التحقق بعد {n} جولات", fixing:"✘ آخر تحقق فشل", self:"🔎 جرّبه النموذج بنفسه", skipped:"", none:""},
+    projVerify:"أمر التحقق (مثل npm test أو pytest — فارغ = اكتشاف تلقائي)",
     deep:"التفكير بعمق", showSent:"إظهار النص المرسل", hint:"Claude Code ينفّذ كل رسالة داخل مجلد المشروع · Enter للإرسال · Shift+Enter لسطر جديد",
     placeholder:"اكتب رسالتك…", welcome:"كيف أستطيع مساعدتك اليوم؟", welcomeSub:"اختر البوابة من الأعلى: OmniRoute أو FreeLLMAPI أو Claude — وClaude Code هو من ينفّذ في كل الحالات.",
     dashboard:"لوحة التحكم", login:"تسجيل الدخول", logout:"تسجيل الخروج", start:"تشغيل", stop:"إيقاف", running:"يعمل", stopped:"متوقف",
@@ -257,6 +267,10 @@ const I18N = {
     intrDetail:"التفاصيل", waitMsg:"↻ {r} — متابعة تلقائية ({a}/{m}) بعد {s}", waitCancel:"إلغاء المتابعة التلقائية", reattached:"هذه المحادثة ما زالت تعمل — تم الاتصال بها من جديد.",
     perms:{acceptEdits:"تعديل الملفات تلقائياً", auto:"تلقائي ذكي (auto)", plan:"تخطيط فقط (قراءة)", bypassPermissions:"كل شيء بلا سؤال ⚠", default:"الافتراضي"}},
   en: {newChat:"+ New chat", search:"Search chats", model:"Model", effort:"Effort", perm:"Permissions",
+    verify:"Verify & fix", verifyTip:"When the model says it is done, Allinone tests the result (tests/build); on failure it sends the error back to be fixed, asks for another approach if it repeats, then checks again",
+    vRound:"🔁 Automatic check (round {n})", vPass:"✔ passed", vFail:"✘ failed (code {code}) — sent back to the model to fix", vSelf:"🔎 No check command; the model was asked to test its own result",
+    vBadge:{passed:"✔ Verified", failed:"✘ Verification failed after {n} rounds", fixing:"✘ Last check failed", self:"🔎 Self-tested by the model", skipped:"", none:""},
+    projVerify:"Check command (e.g. npm test or pytest — empty = detect)",
     deep:"Deep thinking", showSent:"Show sent text", hint:"Claude Code runs every message in the project folder · Enter to send · Shift+Enter for a new line",
     placeholder:"Write your message…", welcome:"How can I help you today?", welcomeSub:"Pick the gateway at the top: OmniRoute, FreeLLMAPI or Claude — Claude Code does the work in every case.",
     dashboard:"Dashboard", login:"Sign in", logout:"Sign out", start:"Start", stop:"Stop", running:"running", stopped:"stopped",
@@ -348,7 +362,7 @@ function applyLang(){
   document.querySelectorAll("[data-i]").forEach(e=>e.textContent=t(e.dataset.i));
   $("#newChat").textContent=t("newChat"); $("#search").placeholder=t("search"); $("#input").placeholder=t("placeholder");
   $("#langBtn").textContent = S.lang==="ar"?"EN":"ع"; $("#attachBtn").title=t("attach"); $("#quitBtn").textContent=t("quit");
-  $("#answerBtn").title=t("answerTip"); $("#answerBtn").textContent="📥 "+t("answer"); $("#reportBtn").textContent=t("report"); $("#reportBtn").title=t("reportTip"); $("#preBtn").title=t("preTip");
+  $("#tVerify").title=t("verifyTip"); $("#answerBtn").title=t("answerTip"); $("#answerBtn").textContent="📥 "+t("answer"); $("#reportBtn").textContent=t("report"); $("#reportBtn").title=t("reportTip"); $("#preBtn").title=t("preTip");
   $("#newChat").textContent = S.tab==="projects" ? t("newProject") : t("newChat");
   fillSelects(); renderPills(); renderPre(); renderProjChip(); S.view==="project" ? renderProjectView() : renderThread();
 }
@@ -367,8 +381,8 @@ $("#effort").onchange = e=>LS.set("effort", e.target.value);
 $("#perm").onchange = e=>LS.set("perm", e.target.value);
 
 /* ---------- toggles ---------- */
-for(const [id, key] of [["deep","deep"],["memory","memory"],["showSent","showSent"]]){
-  const box = $("#"+id); box.checked = LS.get(key,false);
+for(const [id, key] of [["verify","verify"],["deep","deep"],["memory","memory"],["showSent","showSent"]]){
+  const box = $("#"+id); box.checked = LS.get(key, key==="verify");
   const lab = box.closest(".toggle"); lab.classList.toggle("on", box.checked);
   box.onchange = ()=>{ LS.set(key, box.checked); lab.classList.toggle("on", box.checked); if(key==="showSent") renderThread(); };
 }
@@ -544,6 +558,7 @@ function renderProjectView(){
         <label>${esc(t("projFolder"))}</label><div style="display:flex;gap:6px"><input id="pvFolder" dir="ltr" value="${esc(p.folder||"")}"><button class="btn small" id="pvBrowse">📁</button></div>
         <label>${esc(t("projGw"))}</label><select id="pvGw">${gwOpts}</select>
         <label>${esc(t("projModel"))}</label><input id="pvModel" dir="ltr" value="${esc(p.model||"")}" placeholder="${esc(t("keepDefault"))}">
+        <label>🔁 ${esc(t("projVerify"))}</label><input id="pvVerify" dir="ltr" value="${esc(p.verify_command||"")}" placeholder="npm test">
         <div class="mbtns" style="margin-top:12px"><button class="btn primary" id="pvSave">${esc(t("projSave"))}</button><span class="muted" id="pvMsg"></span><span class="spacer"></span><button class="btn small" id="pvDel">🗑 ${esc(t("projDel"))}</button></div>
       </div>
       <div style="display:flex;flex-direction:column;gap:14px">
@@ -556,7 +571,7 @@ function renderProjectView(){
   $("#pvChat").onclick = ()=>startProjectChat(p);
   $("#pvSave").onclick = async ()=>{
     try{ const r = await api("/api/projects/"+p.id,{method:"POST",body:{name:$("#pvName").value, description:$("#pvDesc").value, instructions:$("#pvInstr").value,
-        folder:$("#pvFolder").value.trim(), gateway:$("#pvGw").value, model:$("#pvModel").value.trim()}});
+        folder:$("#pvFolder").value.trim(), gateway:$("#pvGw").value, model:$("#pvModel").value.trim(), verify_command:$("#pvVerify").value.trim()}});
       S.pview = r.project; renderProjectView(); $("#pvMsg").textContent = t("projSaved"); loadProjects(); }catch(e){ $("#pvMsg").textContent = e.message; }
   };
   $("#pvBrowse").onclick = async ()=>{ try{ const r = await api("/api/project",{method:"POST",body:{path:$("#pvFolder").value.trim()||S.project, browse:true}}); $("#pvFolder").value = r.path; }catch(e){ banner(e.message,true); } };
@@ -686,7 +701,14 @@ function assistantHTML(m, isLast){
   const body = parts.map(p=>p.kind==="tool"?toolHTML(p):(p.error?`<div class="err">${esc(p.text)}</div>`:md(p.text))).join("");
   const auto = (meta.approvals||[]).filter(a=>a.auto).map(a=>`<div class="notice">${esc(fmt(t("preAuto"),{t:a.tool}))}</div>`).join("");
   const intr = (isLast && meta.interrupted && !S.running) ? interruptHTML(meta) : "";
-  return `<div class="msg assistant" data-text="${esc(m.display)}"><div class="body">${auto}${body}</div>${metaHTML(meta)}${intr}</div>`;
+  const v = meta.verify; let ver = "";
+  if(v){
+    ver = (v.checks||[]).map(c=>`<div class="${c.code===0?"notice":"err"}" dir="auto">${esc(fmt(t("vRound"),{n:c.round, c:c.cmd}) + " — " + (c.code===0 ? t("vPass") : fmt(t("vFail"),{code:c.code})))}${c.code===0?"":`<details><summary>${esc(t("intrDetail"))}</summary><pre class="vout">${esc(c.output||"")}</pre></details>`}</div>`).join("");
+    if(v.status==="self") ver += `<div class="notice">${esc(t("vSelf"))}</div>`;
+    const badge = fmt((t("vBadge")||{})[v.status]||"", {n:(v.checks||[]).length});
+    if(badge) ver += `<div class="vbadge ${v.status==="passed"?"ok":v.status==="self"?"":"bad"}">${esc(badge)}${v.cmd?` · <code>${esc(v.cmd)}</code>`:""}</div>`;
+  }
+  return `<div class="msg assistant" data-text="${esc(m.display)}"><div class="body">${auto}${body}${ver}</div>${metaHTML(meta)}${intr}</div>`;
 }
 function renderThread(){
   if(S.view==="project") return renderProjectView();
@@ -763,7 +785,7 @@ async function send(extra){
   S.running = run; if(!expert && !resume){ input.value=""; autosize(); } updateSend(); renderThread();
   const payload = {text, gateway:S.gateway, model:$("#model").value.trim(), effort:$("#effort").value, permission_mode:$("#perm").value,
     deep, memory, attachments:atts, project:S.project, conversation_id:S.conv, resume,
-    project_id:S.projectId, preapprove:S.preapprove};
+    project_id:S.projectId, preapprove:S.preapprove, verify:$("#verify").checked};
   if(expert) payload.expert = expert;
   if(!resume){ S.attachments = []; renderChips(); }
   let finalMeta = null;
@@ -801,6 +823,11 @@ function handle(ev, run, userMsg){
       S.messages.push({role:"assistant", display:textAll, meta:ev.meta}); run.parts = []; renderThread(); return; }
     case "auto_resume": run.parts.push({kind:"wait", until:ev.until, title:ev.title, attempt:ev.attempt, max:ev.max}); break;
     case "resume_start": run.parts = []; S.messages.push({role:"user", display:ev.display, sent:ev.sent, meta:{resume:true, auto:true}}); renderThread(); return;
+    case "verify": {
+      if(!ev.check){ run.parts.push({kind:"notice", text:t("vSelf")}); break; }
+      const c = ev.check;
+      run.parts.push({kind:ev.check.code===0?"notice":"error", text: fmt(t("vRound"),{n:c.round, c:c.cmd}) + " — " + (c.code===0 ? t("vPass") : fmt(t("vFail"),{code:c.code})) + (c.code===0 ? "" : "\n"+(c.output||"").slice(-600))});
+      break; }
     case "approval_auto": run.parts.push({kind:"notice", text:fmt(t("preAuto"),{t:ev.tool + (ev.input&&ev.input.command?": "+ev.input.command:"")})}); break;
     case "approval_done": { const p = run.parts.find(x=>x.kind==="approval" && x.id===ev.id); if(p) p.state = ev.behavior; break; }
     default: return;

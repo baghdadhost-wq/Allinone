@@ -15,8 +15,24 @@
           {
             "type": "command",
             "command": "{{python}}",
-            "args": ["{{root}}/claude/hooks/session_start.py"],
+            "args": [
+              "{{root}}/claude/hooks/session_start.py"
+            ],
             "timeout": 15
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{python}}",
+            "args": [
+              "{{root}}/claude/hooks/verify_stop.py"
+            ],
+            "timeout": 900
           }
         ]
       }

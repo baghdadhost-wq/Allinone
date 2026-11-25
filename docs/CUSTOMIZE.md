@@ -292,3 +292,9 @@ OmniRoute مثبت افتراضياً من npm، وهي حزمة جاهزة. ل�
 | `config/prompts/expert_answer.txt` | كيف تُغلَّف الإجابة المرفوعة 📥 (`{answer}` و`{note}`) |
 
 تعليمات المشاريع تُكتب من الواجهة، وتُرسل إلى Claude Code عبر `--append-system-prompt-file`. وتُضاف مجلدات `data/uploads` و`data/reports` و`data/conversations` وملفات المشروع عبر `--add-dir` حتى يقرأها Claude Code دون أن يطلب إذناً.
+
+## «🔁 تحقق وأصلح»
+
+- `claude/hooks/verify_stop.py`: Stop hook يشغّل أمر التحقق عندما يحاول Claude Code الإنهاء. إذا فشل الأمر يرد بـ `{"decision":"block","reason":...}` فيكمل Claude Code العمل بالسبب كتعليمة تالية. لا يعمل إلا إذا ضبط Allinone `ALLINONE_VERIFY=1`، أي عند تفعيل الزر.
+- يمكنك تعديل `detect_command()` في الملف نفسه لتضيف أنواع مشاريع أخرى.
+- النصوص في `config/prompts/work_method.txt` و`verify_fix.txt` و`verify_change_approach.txt` و`verify_self_check.txt`.

@@ -92,6 +92,10 @@ def connect(path: Path) -> sqlite3.Connection:
     if "project_id" not in cols:  # databases created by earlier versions
         conn.execute("ALTER TABLE conversations ADD COLUMN project_id INTEGER")
         conn.commit()
+    pcols = {r[1] for r in conn.execute("PRAGMA table_info(projects)")}
+    if "verify_command" not in pcols:
+        conn.execute("ALTER TABLE projects ADD COLUMN verify_command TEXT NOT NULL DEFAULT ''")
+        conn.commit()
     return conn
 
 
@@ -244,15 +248,16 @@ class Store:
         return out
 
     # ------------------------------------------------------------------ projects
-    PROJECT_FIELDS = ("name", "description", "instructions", "folder", "gateway", "model")
+    PROJECT_FIELDS = ("name", "description", "instructions", "folder", "gateway", "model", "verify_command")
 
     def new_project(self, **fields: Any) -> int:
         now = time.time()
         data = {k: str(fields.get(k) or "") for k in self.PROJECT_FIELDS}
         data["name"] = data["name"].strip() or "مشروع"
-        cur = self.conn.execute(
-            "INSERT INTO projects(created, updated, name, description, instructions, folder, gateway, model) "
-            "VALUES (?,?,?,?,?,?,?,?)", (now, now, *[data[k] for k in self.PROJECT_FIELDS]))
+        cols = ", ".join(self.PROJECT_FIELDS)
+        marks = ",".join("?" * len(self.PROJECT_FIELDS))
+        cur = self.conn.execute(f"INSERT INTO projects(created, updated, {cols}) VALUES (?,?,{marks})",
+                                (now, now, *[data[k] for k in self.PROJECT_FIELDS]))
         self.conn.commit()
         return int(cur.lastrowid)
 

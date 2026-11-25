@@ -59,6 +59,43 @@ def ask_gateway(prompt):
         return json.loads(resp.read())["content"][0]["text"]
 
 
+def run_stop_hooks(argv, sid, prompt):
+    """Like Claude Code: before finishing, run the Stop hooks; a "block" decision means keep working."""
+    with open(arg_values(argv, "--settings")[0], encoding="utf-8") as fh:
+        settings = json.load(fh)
+    transcript = os.environ["FAKE_CLAUDE_RECORD"] + ".transcript.jsonl"
+    lines = [{"type": "user", "message": {"role": "user", "content": prompt}}]
+    if "USE_TOOL" in prompt or "EDIT" in prompt:
+        lines.append({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "t1", "name": "Write", "input": {"file_path": "x.py"}}]}})
+    with open(transcript, "w", encoding="utf-8") as fh:
+        fh.write("".join(json.dumps(l) + "\n" for l in lines))
+    env = dict(os.environ)
+    env.update(settings.get("env") or {})
+    reasons, active = [], False
+    fix_after = int(os.environ.get("FAKE_FIX_AFTER", "0"))
+    for round_ in range(10):
+        decision = None
+        for group in (settings.get("hooks") or {}).get("Stop", []):
+            for h in group.get("hooks", []):
+                res = subprocess.run([h["command"], *h.get("args", [])], env=env, cwd=os.getcwd(), timeout=120,
+                                     input=json.dumps({"session_id": sid, "hook_event_name": "Stop",
+                                                       "stop_hook_active": active, "cwd": os.getcwd(),
+                                                       "transcript_path": transcript}).encode(),
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                out = res.stdout.decode("utf-8").strip()
+                if out.startswith("{") and json.loads(out).get("decision") == "block":
+                    decision = json.loads(out)
+        if not decision:
+            break
+        reasons.append(decision["reason"])
+        emit({"type": "assistant", "message": {"content": [{"type": "text", "text": f"fixing round {round_ + 1}"}]}})
+        if "FIX_ON_BLOCK" in prompt and round_ + 1 > fix_after:
+            open("fixed.txt", "w").close()
+        active = True
+    return reasons
+
+
 def emit(obj):
     sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
     sys.stdout.flush()
@@ -126,6 +163,7 @@ def stream(prompt, argv):
         time.sleep(wait_s)
     if "SLOW" in prompt:
         time.sleep(180)
+    reasons = run_stop_hooks(argv, sid, prompt)
     text = ask_gateway(prompt[-200:])
     emit({"type": "stream_event", "event": {"type": "message_start", "message": {"id": "m1"}}})
     emit({"type": "stream_event", "event": {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}})
@@ -135,6 +173,7 @@ def stream(prompt, argv):
     emit({"type": "assistant", "message": {"id": "m1", "content": [{"type": "text", "text": text}]}})
     emit({"type": "result", "subtype": "success", "is_error": False, "result": text, "session_id": sid,
           "num_turns": 1, "duration_ms": 9, "total_cost_usd": 0.0012})
+    return reasons
 
 
 def main():
@@ -180,7 +219,7 @@ def main():
     if "-p" in argv and "stream-json" in argv:
         prompt = sys.stdin.read()
         record["prompt"] = prompt
-        stream(prompt, argv)
+        record["stop_reasons"] = stream(prompt, argv) or []
     elif "-p" in argv:
         prompt = sys.stdin.read()
         record["prompt"] = prompt
