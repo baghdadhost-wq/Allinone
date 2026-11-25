@@ -68,7 +68,21 @@ def stream(prompt, argv):
     """Mimic `claude -p --output-format stream-json --verbose --include-partial-messages`."""
     import time
     sid = argv[argv.index("--resume") + 1] if "--resume" in argv else "sess-stream-1"
+    if sid == "gone":
+        sys.stderr.write("No conversation found with session ID: gone\n")
+        raise SystemExit(1)
     emit({"type": "system", "subtype": "init", "session_id": sid, "model": os.environ.get("ANTHROPIC_MODEL", "fake")})
+    if "FAIL_429" in prompt:
+        emit({"type": "result", "subtype": "error_during_execution", "is_error": True, "session_id": sid,
+              "result": "API Error: 429 rate limit exceeded for all providers"})
+        return
+    if "CRASH_MID" in prompt:
+        emit({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "toolu_c", "name": "Write", "input": {"file_path": "half.py", "content": "x"}}]}})
+        emit({"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "toolu_c", "content": "File created", "is_error": False}]}})
+        sys.stderr.write("fatal: something broke\n")
+        raise SystemExit(3)
     if "USE_TOOL" in prompt:
         emit({"type": "assistant", "message": {"id": "m0", "content": [
             {"type": "tool_use", "id": "toolu_1", "name": "Write", "input": {"file_path": "hello.txt", "content": "hi"}}]}})

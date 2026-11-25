@@ -150,7 +150,13 @@
     // الصلاحية الافتراضية لـ Claude Code في الواجهة:
     // acceptEdits | auto | plan | bypassPermissions | default
     "permission_mode": "acceptEdits",
-    "max_upload_mb": 200                // أكبر حجم لملف مرفق
+    "max_upload_mb": 200,               // أكبر حجم لملف مرفق
+    // المتابعة التلقائية إذا انقطع العمل لسبب مؤقت (توقف البوابة، حد الطلبات، الشبكة، حد حساب Claude...)
+    "auto_resume": {
+      "enabled": true,
+      "max_attempts": 3,                // أقصى عدد محاولات متتالية
+      "max_wait_minutes": 360           // لا ينتظر تلقائياً أطول من هذا (مثلاً تجدد حد Claude)
+    }
   },
 
   // ----------------------------------------------- المهام غير التفاعلية (run / task)

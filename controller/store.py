@@ -212,6 +212,25 @@ class Store:
         self.conn.commit()
         return int(cur.lastrowid)
 
+    def update_message(self, message_id: int, display: str, meta: Dict[str, Any]) -> None:
+        self.conn.execute("UPDATE messages SET display=?, meta=? WHERE id=?",
+                          (display, json.dumps(meta, ensure_ascii=False), message_id))
+        self.conn.commit()
+
+    def unfinished_messages(self) -> List[Dict[str, Any]]:
+        """Assistant messages still marked as running (Allinone was closed or crashed mid-reply)."""
+        rows = self.conn.execute("SELECT * FROM messages WHERE role='assistant' AND meta LIKE '%\"running\": true%'").fetchall()
+        out = []
+        for r in rows:
+            item = dict(r)
+            try:
+                item["meta"] = json.loads(r["meta"] or "{}")
+            except ValueError:
+                continue
+            if item["meta"].get("running"):
+                out.append(item)
+        return out
+
     def messages(self, conv_id: int) -> List[Dict[str, Any]]:
         rows = self.conn.execute("SELECT * FROM messages WHERE conv_id=? ORDER BY id", (conv_id,)).fetchall()
         out = []

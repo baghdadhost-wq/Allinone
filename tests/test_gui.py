@@ -129,7 +129,11 @@ class GuiServerTests(unittest.TestCase):
         conv_id = self.of(first, "conversation")[0]["id"]
         ev = self.chat(text="hello claude", gateway="claude", conversation_id=conv_id)
         self.assertTrue(self.of(ev, "notice"), "switching gateway should explain the new session")
-        self.assertIn("claude-direct: hello claude", "".join(e["text"] for e in self.of(ev, "delta")))
+        self.assertTrue("".join(e["text"] for e in self.of(ev, "delta")).startswith("claude-direct:"))
+        sent = self.sb.read_record()["prompt"]
+        self.assertIn("ملف تسليم المهمة", sent)              # hand-over note of the earlier work
+        self.assertIn("first via omni-fake", sent)
+        self.assertTrue(sent.rstrip().endswith("hello claude"))
         rec = self.sb.read_record()
         self.assertNotIn("ANTHROPIC_BASE_URL", rec["env"])
         self.assertNotIn("ANTHROPIC_AUTH_TOKEN", rec["env"])
@@ -436,6 +440,129 @@ class GuiServerTests(unittest.TestCase):
         self.assertEqual(json.loads(self.call("/api/projects")[1])["projects"], [])
         self.assertIsNone(self.ctx.store().conversation(conv_id)["project_id"])  # the chat is kept
         self.assertFalse((self.ctx.data_dir / "projects" / str(pid)).exists())
+
+    # ------------------------------------------------------------- interruptions
+    def _fast_resume(self):
+        saved = dict(gui._REASONS)
+        for k, v in saved.items():
+            gui._REASONS[k] = (v[0], v[1], 0, v[3], v[4])
+        self.addCleanup(lambda: gui._REASONS.update(saved))
+
+    def test_rate_limit_resumes_automatically_in_same_session(self):
+        self._fast_resume()
+        ev = self.chat(text="build it FAIL_429", gateway="fake")
+        conv_id = self.of(ev, "conversation")[0]["id"]
+        saved = self.of(ev, "saved")
+        self.assertEqual(len(saved), 2)
+        self.assertEqual(saved[0]["meta"]["interrupted"]["reason"], "rate_limit")
+        self.assertNotIn("interrupted", saved[1]["meta"])
+        auto = self.of(ev, "auto_resume")[0]
+        self.assertEqual((auto["attempt"], auto["reason"]), (1, "rate_limit"))
+        argv = self.sb.read_record()["argv"]
+        self.assertEqual(argv[argv.index("--resume") + 1], "sess-stream-1")   # same Claude Code session
+        self.assertIn("انقطع تنفيذ المهمة", self.sb.read_record()["prompt"])
+        users = [m for m in self.ctx.store().messages(conv_id) if m["role"] == "user"]
+        self.assertEqual([u["display"] for u in users], ["build it FAIL_429", "↻ متابعة تلقائية (1/3)"])
+
+    def test_crash_keeps_partial_work_and_continue_button(self):
+        self.app.ctx.cfg.data.setdefault("gui", {})["auto_resume"] = {"enabled": False}
+        ev = self.chat(text="write code CRASH_MID", gateway="fake")
+        conv_id = self.of(ev, "conversation")[0]["id"]
+        meta = self.of(ev, "saved")[0]["meta"]
+        self.assertEqual(meta["interrupted"]["reason"], "crash")
+        self.assertIn("something broke", meta["interrupted"]["detail"])
+        self.assertTrue(any(p.get("name") == "Write" for p in meta["parts"]))   # the step done before the crash
+        self.assertEqual(self.ctx.store().conversation(conv_id)["session_id"], "sess-stream-1")  # saved at init
+        ev = self.chat(gateway="fake", conversation_id=conv_id, resume=True)
+        self.assertFalse(self.of(ev, "error"))
+        rec = self.sb.read_record()
+        self.assertIn("--resume", rec["argv"])
+        self.assertIn("انقطع تنفيذ المهمة", rec["prompt"])
+        self.assertIn("خرج Claude Code بخطأ غير متوقع", rec["prompt"])
+
+    def test_closed_mid_reply_is_recovered(self):
+        conv_id = self.ctx.store().new_conversation("t", "fake", "", str(self.sb.project))
+        self.ctx.store().update_conversation(conv_id, session_id="sess-old", session_gateway="fake")
+        self.ctx.store().add_message(conv_id, "user", "make an app", "make an app", {})
+        mid = self.ctx.store().add_message(conv_id, "assistant", "half", meta={
+            "running": True, "gateway": "fake", "gateway_type": "custom",
+            "parts": [{"kind": "tool", "name": "Write", "input": {"file_path": "app.py"}, "result": "ok"}]})
+        self.assertEqual(self.app.recover_interrupted(), 1)
+        meta = self.ctx.store().messages(conv_id)[-1]["meta"]
+        self.assertFalse(meta["running"])
+        self.assertEqual(meta["interrupted"]["reason"], "closed")
+        self.assertEqual(self.app.recover_interrupted(), 0)
+        self.chat(gateway="fake", conversation_id=conv_id, resume=True)
+        argv = self.sb.read_record()["argv"]
+        self.assertEqual(argv[argv.index("--resume") + 1], "sess-old")
+        self.assertEqual(mid, self.ctx.store().messages(conv_id)[1]["id"])
+
+    def test_lost_session_falls_back_to_handoff(self):
+        self._fast_resume()
+        first = self.chat(text="first USE_TOOL", gateway="fake")
+        conv_id = self.of(first, "conversation")[0]["id"]
+        self.ctx.store().update_conversation(conv_id, session_id="gone")
+        ev = self.chat(text="next step", gateway="fake", conversation_id=conv_id)
+        saved = self.of(ev, "saved")
+        self.assertEqual(saved[0]["meta"]["interrupted"]["reason"], "session_missing")
+        self.assertNotIn("interrupted", saved[-1]["meta"])
+        rec = self.sb.read_record()
+        self.assertNotIn("--resume", rec["argv"])
+        self.assertIn("ملف تسليم المهمة", rec["prompt"])
+        self.assertIn("✔ hello.txt", rec["prompt"])          # files done earlier are listed
+        handoff = self.ctx.data_dir / "conversations" / f"handoff-{conv_id}.md"
+        self.assertTrue(handoff.is_file())
+
+    def test_stop_cancels_waiting_resume(self):
+        saved = dict(gui._REASONS)
+        gui._REASONS["rate_limit"] = (saved["rate_limit"][0], True, 120, "continue", 3)
+        self.addCleanup(lambda: gui._REASONS.update(saved))
+        th, box = self._chat_async(text="FAIL_429", gateway="fake")
+        conv_id = None
+        for _ in range(300):
+            time.sleep(0.1)
+            with self.app.lock:
+                live = next(iter(self.app.live.items()), None)
+            if live and live[1].get("waiting"):
+                conv_id = live[0]
+                break
+        self.assertIsNotNone(conv_id)
+        state = json.loads(self.call(f"/api/conversations/{conv_id}/live")[1])
+        self.assertTrue(state["running"] and state["waiting"])
+        self.assertTrue(json.loads(self.call(f"/api/conversations/{conv_id}")[1])["conversation"]["running"])
+        self.assertTrue(json.loads(self.call("/api/stop", {"run_id": "", "conversation_id": conv_id})[1])["ok"])
+        th.join(30)
+        self.assertFalse(th.is_alive())
+        self.assertEqual(len(self.of(box["events"], "saved")), 1)
+
+
+class DiagnoseTests(unittest.TestCase):
+    def test_reasons_per_gateway(self):
+        d = gui.diagnose("omniroute", "API Error: 429 Too Many Requests")
+        self.assertEqual((d["reason"], d["retry"]), ("rate_limit", True))
+        self.assertIn("OmniRoute", d["advice"])
+        self.assertIn("FreeLLMAPI", gui.diagnose("freellmapi", "quota exhausted")["advice"])
+        self.assertEqual(gui.diagnose("freellmapi", "fetch failed", gw_up=False)["reason"], "gateway_down")
+        self.assertEqual(gui.diagnose("omniroute", "connect ECONNREFUSED 127.0.0.1:20128")["reason"], "network")
+        self.assertEqual(gui.diagnose("anthropic", "Invalid API key · Please run /login")["reason"], "auth")
+        self.assertFalse(gui.diagnose("anthropic", "Please run /login")["retry"])
+        self.assertEqual(gui.diagnose("custom", "prompt is too long: 250000 tokens")["mode"], "handoff")
+        self.assertEqual(gui.diagnose("custom", "", subtype="error_max_turns")["reason"], "max_turns")
+        self.assertEqual(gui.diagnose("custom", "x", stopped=True)["retry"], False)
+
+    def test_claude_usage_limit_reset_time(self):
+        now = time.mktime((2026, 11, 25, 13, 10, 0, 0, 0, -1))
+        d = gui.diagnose("anthropic", "Claude AI usage limit reached|%d" % (now + 3600), now=now)
+        self.assertEqual(d["reason"], "usage_limit")
+        self.assertEqual(d["resume_at"], now + 3600)
+        self.assertEqual(d["wait"], 3630)
+        d = gui.diagnose("anthropic", "5-hour limit reached ∙ resets 3pm", now=now)
+        self.assertEqual(time.localtime(d["resume_at"]).tm_hour, 15)
+        d = gui.diagnose("anthropic", "You've hit your limit · resets 11am", now=now)
+        self.assertEqual(d["resume_at"] - now, 22 * 3600 - 10 * 60)    # tomorrow
+        d = gui.diagnose("anthropic", "usage limit reached")
+        self.assertFalse(d["retry"])
+        self.assertIn("OmniRoute", d["advice"])
 
 
 class StoreMigrationTests(unittest.TestCase):

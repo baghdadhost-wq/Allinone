@@ -157,6 +157,13 @@ main{flex:1;display:flex;flex-direction:column;min-width:0}
 .modal .mbtns{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 .modal .muted{color:var(--muted);font-size:12.5px}
 @media (max-width:760px){.pgrid{grid-template-columns:1fr}}
+.intr{border:1px solid var(--warn);background:rgba(192,138,28,.08);border-radius:12px;padding:10px 12px;margin:10px 0;font-size:14px}
+.intr .ih{font-weight:600;margin-bottom:4px}
+.intr .ia{color:var(--muted);margin-bottom:8px}
+.intr details{font-size:12px;color:var(--muted);margin-bottom:8px}
+.intr details pre{white-space:pre-wrap;direction:ltr;text-align:left;max-height:160px;overflow:auto;background:var(--code);padding:6px;border-radius:6px}
+.intr .ib{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.waitbox{border:1px dashed var(--accent);border-radius:12px;padding:9px 12px;margin:10px 0;display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:14px}
 .hint{max-width:820px;margin:6px auto 0;color:var(--muted);font-size:12px;text-align:center}
 @media (max-width:760px){#sidebar{position:fixed;z-index:5;height:100%}#app.side-hidden #sidebar{margin-inline-start:-290px}.field select,.field input{max-width:130px}}
 </style>
@@ -246,6 +253,8 @@ const I18N = {
     answer:"رفع إجابة", answerTip:"رفع إجابة من نموذج أذكى إلى هذه المحادثة ليطبّقها Claude Code", answerTitle:"📥 رفع إجابة خارجية",
     answerHelp:"الصق الإجابة التي حصلت عليها (من Claude.ai أو أي نموذج آخر)، أو اختر ملف txt/md. سيقرؤها Claude Code ويطبّقها على المشروع في هذه المحادثة.",
     answerFile:"📄 اختيار ملف", answerNote:"ملاحظة (اختياري)", answerSend:"إرسال للتطبيق", answerEmpty:"الصق الإجابة أولاً.", expertBadge:"📥 إجابة خارجية", close:"إغلاق", cancel:"إلغاء",
+    intrTitle:"⚠ انقطع العمل قبل أن يكتمل:", resume:"▶ متابعة", resumeVia:"▶ متابعة عبر {g} (بملف تسليم)", resumeAt:"يتجدد الحد عند {t}",
+    intrDetail:"التفاصيل", waitMsg:"↻ {r} — متابعة تلقائية ({a}/{m}) بعد {s}", waitCancel:"إلغاء المتابعة التلقائية", reattached:"هذه المحادثة ما زالت تعمل — تم الاتصال بها من جديد.",
     perms:{acceptEdits:"تعديل الملفات تلقائياً", auto:"تلقائي ذكي (auto)", plan:"تخطيط فقط (قراءة)", bypassPermissions:"كل شيء بلا سؤال ⚠", default:"الافتراضي"}},
   en: {newChat:"+ New chat", search:"Search chats", model:"Model", effort:"Effort", perm:"Permissions",
     deep:"Deep thinking", showSent:"Show sent text", hint:"Claude Code runs every message in the project folder · Enter to send · Shift+Enter for a new line",
@@ -275,6 +284,8 @@ const I18N = {
     answer:"Upload answer", answerTip:"Upload an answer from a smarter model into this chat so Claude Code applies it", answerTitle:"📥 Upload an external answer",
     answerHelp:"Paste the answer you got (from Claude.ai or any other model) or pick a txt/md file. Claude Code will read it and apply it to the project in this chat.",
     answerFile:"📄 Pick a file", answerNote:"Note (optional)", answerSend:"Send to apply", answerEmpty:"Paste the answer first.", expertBadge:"📥 external answer", close:"Close", cancel:"Cancel",
+    intrTitle:"⚠ The work stopped before it finished:", resume:"▶ Continue", resumeVia:"▶ Continue via {g} (with a hand-over note)", resumeAt:"The limit resets at {t}",
+    intrDetail:"Details", waitMsg:"↻ {r} — automatic resume ({a}/{m}) in {s}", waitCancel:"Cancel automatic resume", reattached:"This chat is still running — reconnected to it.",
     perms:{acceptEdits:"Edit files automatically", auto:"Smart auto (auto)", plan:"Plan only (read)", bypassPermissions:"Everything, no questions ⚠", default:"Default"}}
 };
 const $ = s => document.querySelector(s);
@@ -436,7 +447,7 @@ async function loadConvs(){
   const q = $("#search").value.trim();
   const r = await api("/api/conversations"+(q?"?q="+encodeURIComponent(q):""));
   const pname = id => (S.projects.find(p=>p.id===id)||{}).name || "";
-  $("#convList").innerHTML = r.conversations.map(c=>`<div class="conv ${S.conv===c.id?"active":""}" data-id="${c.id}"><span class="t" dir="auto">${c.project_id?`<span class="tag">📂 ${esc(pname(c.project_id))} · </span>`:""}${esc(c.title||"…")}</span>
+  $("#convList").innerHTML = r.conversations.map(c=>`<div class="conv ${S.conv===c.id?"active":""}" data-id="${c.id}"><span class="t" dir="auto">${c.project_id?`<span class="tag">📂 ${esc(pname(c.project_id))} · </span>`:""}${c.running?"⏳ ":""}${esc(c.title||"…")}</span>
     <span class="acts"><button data-act="ren" title="rename">✎</button><button data-act="exp" title="${esc(t("export"))}">⇩</button><button data-act="del" title="delete">🗑</button></span></div>`).join("");
   document.querySelectorAll(".conv").forEach(el=>el.onclick = async ev=>{
     const id = +el.dataset.id; const act = ev.target.dataset && ev.target.dataset.act;
@@ -450,12 +461,32 @@ async function loadConvs(){
 let searchTimer; $("#search").oninput = ()=>{ clearTimeout(searchTimer); searchTimer = setTimeout(loadConvs, 250); };
 async function openConv(id){
   if(S.running) return;
-  const r = await api("/api/conversations/"+id); S.conv = id; S.messages = r.messages; S.view = "chat";
+  const r = await api("/api/conversations/"+id); S.conv = id; S.view = "chat";
+  S.messages = r.conversation.running ? r.messages.filter(m=>!(m.role==="assistant" && m.meta && m.meta.running)) : r.messages;
   S.projectId = r.conversation.project_id || null; S.projectName = r.conversation.project_name || "";
   S.preapprove = !!r.conversation.preapproved;
   if(r.conversation.project){ S.project = r.conversation.project; showProject(); }
   if(r.conversation.gateway && gwInfo(r.conversation.gateway)) selectGateway(r.conversation.gateway);
   renderPre(); renderProjChip(); renderThread(); loadConvs();
+  if(r.conversation.running) watchConv(id);
+}
+/* A reply that is still running on the server (page reloaded, another tab...): follow it. */
+async function watchConv(id){
+  const el = document.createElement("div"); el.className = "msg assistant"; el.innerHTML = `<div class="body"></div>`;
+  const run = {el, body: el.querySelector(".body"), parts: [], runId:null, watch:true};
+  S.running = run; updateSend(); renderThread(); banner(t("reattached"));
+  while(S.running===run && S.conv===id){
+    let st; try{ st = await api(`/api/conversations/${id}/live`); }catch(e){ break; }
+    if(!st.running) break;
+    run.runId = st.run_id;
+    const old = Object.fromEntries(run.parts.filter(x=>x.kind==="approval").map(x=>[x.id,x]));
+    run.parts = (st.parts||[]).map(p=>p.kind==="text"&&p.error?{kind:"error",text:p.text}:p)
+      .concat((st.pending||[]).map(a=>old[a.id]||{kind:"approval", id:a.id, tool:a.tool, input:a.input, state:null}))
+      .concat(st.waiting?[{kind:"wait", until:st.waiting.until, title:st.waiting.title, attempt:st.waiting.attempt, max:st.waiting.max}]:[]);
+    drawRun(run);
+    await new Promise(r=>setTimeout(r, 1000));
+  }
+  if(S.running===run){ S.running = null; updateSend(); banner(""); if(S.conv===id) openConv(id); }
 }
 function newChat(keepProject){
   if(S.running) return; S.conv = null; S.messages = []; S.view = "chat"; S.preapprove = false;
@@ -641,11 +672,21 @@ function metaHTML(meta, text){
   const bits = [meta.gateway_title||meta.gateway, meta.model, meta.duration_ms?((meta.duration_ms/1000).toFixed(1)+" "+t("sec")):"", meta.num_turns?(meta.num_turns+" "+t("turns")):"", meta.cost_usd?("$"+Number(meta.cost_usd).toFixed(4)):""].filter(Boolean);
   return `<div class="meta"><span>${bits.map(esc).join(" · ")}</span><button data-copytext>${esc(t("copy"))}</button><button data-mem>${esc(t("toMemory"))}</button></div>`;
 }
-function assistantHTML(m){
+function interruptHTML(meta){
+  const d = meta.interrupted; const g = gwInfo(S.gateway);
+  const other = S.gateway && meta.gateway && S.gateway!==meta.gateway && g;
+  const at = d.resume_at ? new Date(d.resume_at*1000).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"}) : "";
+  return `<div class="intr"><div class="ih">${esc(t("intrTitle"))} ${esc(d.title||d.reason)}</div><div class="ia" dir="auto">${esc(d.advice||"")}${at?" · "+esc(fmt(t("resumeAt"),{t:at})):""}</div>
+    ${d.detail&&d.detail.trim()?`<details><summary>${esc(t("intrDetail"))}</summary><pre>${esc(d.detail)}</pre></details>`:""}
+    <div class="ib"><button class="btn primary small" data-resume>${esc(other?fmt(t("resumeVia"),{g:g.title}):t("resume"))}</button>
+    <button class="btn small" data-report>${esc(t("report"))}</button></div></div>`;
+}
+function assistantHTML(m, isLast){
   const meta = m.meta||{}; const parts = meta.parts || [{kind:"text", text:m.display}];
   const body = parts.map(p=>p.kind==="tool"?toolHTML(p):(p.error?`<div class="err">${esc(p.text)}</div>`:md(p.text))).join("");
   const auto = (meta.approvals||[]).filter(a=>a.auto).map(a=>`<div class="notice">${esc(fmt(t("preAuto"),{t:a.tool}))}</div>`).join("");
-  return `<div class="msg assistant" data-text="${esc(m.display)}"><div class="body">${auto}${body}</div>${metaHTML(meta)}</div>`;
+  const intr = (isLast && meta.interrupted && !S.running) ? interruptHTML(meta) : "";
+  return `<div class="msg assistant" data-text="${esc(m.display)}"><div class="body">${auto}${body}</div>${metaHTML(meta)}${intr}</div>`;
 }
 function renderThread(){
   if(S.view==="project") return renderProjectView();
@@ -653,13 +694,15 @@ function renderThread(){
   if(!S.messages.length && !S.running){
     th.innerHTML = `<div id="welcome"><h1><span class="star">✳</span> ${esc(t("welcome"))}</h1><p>${esc(t("welcomeSub"))}</p></div>`; return;
   }
-  th.innerHTML = S.messages.map(m=>m.role==="user"?userHTML(m):assistantHTML(m)).join("");
+  th.innerHTML = S.messages.map((m,i)=>m.role==="user"?userHTML(m):assistantHTML(m, i===S.messages.length-1)).join("");
   if(S.running) th.appendChild(S.running.el);
   wire(th); scrollDown(true);
 }
 function wire(root){
   root.querySelectorAll("[data-copy]").forEach(b=>b.onclick=()=>{ navigator.clipboard.writeText(b.parentElement.querySelector("code").innerText); b.textContent=t("copied"); });
   root.querySelectorAll("[data-copytext]").forEach(b=>b.onclick=()=>{ navigator.clipboard.writeText(b.closest(".msg").dataset.text||""); b.textContent=t("copied"); });
+  root.querySelectorAll("[data-resume]").forEach(b=>b.onclick=()=>send({resume:true}));
+  root.querySelectorAll("[data-report]").forEach(b=>b.onclick=()=>$("#reportBtn").click());
   root.querySelectorAll("[data-mem]").forEach(b=>b.onclick=async()=>{ const txt = b.closest(".msg").dataset.text||""; if(!txt) return;
     await api("/api/memory",{method:"POST",body:{text:txt.slice(0,4000), tags:"gui"}}); b.textContent=t("saved"); });
 }
@@ -701,27 +744,28 @@ function updateSend(){ const b = $("#send"); if(S.running){ b.disabled=false; b.
 input.oninput = ()=>{ autosize(); updateSend(); };
 input.onkeydown = e=>{ if(e.key==="Enter" && !e.shiftKey && !e.isComposing){ e.preventDefault(); if(!S.running) send(); } };
 $("#send").onclick = ()=>{ if(S.running) stopRun(); else send(); };
-async function stopRun(){ if(S.running && S.running.runId){ try{ await api("/api/stop",{method:"POST",body:{run_id:S.running.runId}}); }catch(e){} } }
+async function stopRun(){ if(S.running){ try{ await api("/api/stop",{method:"POST",body:{run_id:S.running.runId||"", conversation_id:S.conv||0}}); }catch(e){} } }
 
 async function send(extra){
   extra = extra || {};
-  const expert = extra.expert || null;
-  const text = expert ? (extra.text||"") : input.value.trim();
-  if((!text && !expert) || S.running || S.attachments.some(a=>!a.path)) return;
+  const expert = extra.expert || null, resume = !!extra.resume;
+  const text = (expert||resume) ? (extra.text||"") : input.value.trim();
+  if((!text && !expert && !resume) || S.running || (!resume && S.attachments.some(a=>!a.path))) return;
   banner("");
   if(S.view==="project"){ if(S.pview) startProjectChat(S.pview); else newChat(false); }
   const deep = $("#deep").checked, memory = $("#memory").checked;
-  const shown = text || (expert ? t("expertBadge") : "");
-  const userMsg = {role:"user", display:shown, sent:shown, meta:{deep, memory, expert:!!expert, attachments:S.attachments.map(a=>a.path)}};
+  const shown = text || (expert ? t("expertBadge") : resume ? t("resume") : "");
+  const atts = resume ? [] : S.attachments.map(a=>a.path);
+  const userMsg = {role:"user", display:shown, sent:shown, meta:{deep, memory, expert:!!expert, resume, attachments:atts}};
   S.messages.push(userMsg);
   const el = document.createElement("div"); el.className = "msg assistant"; el.innerHTML = `<div class="body"><p class="cursor"></p></div>`;
   const run = {el, body: el.querySelector(".body"), parts: [], runId:null};
-  S.running = run; if(!expert){ input.value=""; autosize(); } updateSend(); renderThread();
+  S.running = run; if(!expert && !resume){ input.value=""; autosize(); } updateSend(); renderThread();
   const payload = {text, gateway:S.gateway, model:$("#model").value.trim(), effort:$("#effort").value, permission_mode:$("#perm").value,
-    deep, memory, attachments:S.attachments.map(a=>a.path), project:S.project, conversation_id:S.conv,
+    deep, memory, attachments:atts, project:S.project, conversation_id:S.conv, resume,
     project_id:S.projectId, preapprove:S.preapprove};
   if(expert) payload.expert = expert;
-  S.attachments = []; renderChips();
+  if(!resume){ S.attachments = []; renderChips(); }
   let finalMeta = null;
   try{
     const res = await fetch("/api/chat",{method:"POST",headers:{"X-Allinone-Token":TOKEN,"Content-Type":"application/json"},body:JSON.stringify(payload)});
@@ -730,17 +774,19 @@ async function send(extra){
     for(;;){
       const {value, done} = await reader.read(); if(done) break;
       buf += dec.decode(value, {stream:true}); let nl;
-      while((nl = buf.indexOf("\n")) >= 0){ const line = buf.slice(0,nl).trim(); buf = buf.slice(nl+1); if(line){ try{ const ev = JSON.parse(line); if(ev.type==="saved") finalMeta = ev.meta; handle(ev, run, userMsg); }catch(e){} } }
+      while((nl = buf.indexOf("\n")) >= 0){ const line = buf.slice(0,nl).trim(); buf = buf.slice(nl+1); if(line){ try{ const ev = JSON.parse(line); handle(ev, run, userMsg); }catch(e){} } }
     }
   }catch(e){ run.parts.push({kind:"error", text:e.message}); drawRun(run); }
-  const textAll = run.parts.filter(p=>p.kind==="text").map(p=>p.text).join("\n\n");
-  S.messages.push({role:"assistant", display:textAll, meta: finalMeta || {parts: run.parts.map(p=>p.kind==="error"?{kind:"text",text:p.text,error:true}:p)}});
+  if(run.parts.some(p=>p.kind!=="notice")){  // nothing was saved by the server (connection lost...)
+    const textAll = run.parts.filter(p=>p.kind==="text").map(p=>p.text).join("\n\n");
+    S.messages.push({role:"assistant", display:textAll, meta:{parts: run.parts.filter(p=>p.kind!=="wait").map(p=>p.kind==="error"?{kind:"text",text:p.text,error:true}:p)}});
+  }
   S.running = null; updateSend(); renderThread(); loadConvs(); refreshState();
 }
 function handle(ev, run, userMsg){
   switch(ev.type){
     case "conversation": S.conv = ev.id; renderProjChip(); loadConvs(); break;
-    case "start": run.runId = ev.run_id; userMsg.sent = ev.sent; refreshState(); if($("#showSent").checked) renderThread(); break;
+    case "start": run.runId = ev.run_id; if(!userMsg._started){ userMsg.sent = ev.sent; userMsg._started = true; } refreshState(); if($("#showSent").checked) renderThread(); break;
     case "notice": run.parts.push({kind:"notice", text:ev.text}); break;
     case "segment": run.parts.push({kind:"text", text:""}); break;
     case "delta": { let p = run.parts[run.parts.length-1]; if(!p || p.kind!=="text"){ p={kind:"text",text:""}; run.parts.push(p); } p.text += ev.text; break; }
@@ -750,20 +796,32 @@ function handle(ev, run, userMsg){
     case "tool_result": { const p = run.parts.find(x=>x.kind==="tool" && x.id===ev.id); if(p){ p.result = ev.content; p.is_error = ev.is_error; } break; }
     case "error": run.parts.push({kind:"error", text:ev.text}); if(ev.need_login){ banner(ev.text, true); } break;
     case "approval": run.parts.push({kind:"approval", id:ev.id, tool:ev.tool, input:ev.input, state:null}); break;
+    case "saved": {
+      const textAll = (ev.meta.parts||[]).filter(p=>p.kind==="text"&&!p.error).map(p=>p.text).join("\n\n");
+      S.messages.push({role:"assistant", display:textAll, meta:ev.meta}); run.parts = []; renderThread(); return; }
+    case "auto_resume": run.parts.push({kind:"wait", until:ev.until, title:ev.title, attempt:ev.attempt, max:ev.max}); break;
+    case "resume_start": run.parts = []; S.messages.push({role:"user", display:ev.display, sent:ev.sent, meta:{resume:true, auto:true}}); renderThread(); return;
     case "approval_auto": run.parts.push({kind:"notice", text:fmt(t("preAuto"),{t:ev.tool + (ev.input&&ev.input.command?": "+ev.input.command:"")})}); break;
     case "approval_done": { const p = run.parts.find(x=>x.kind==="approval" && x.id===ev.id); if(p) p.state = ev.behavior; break; }
     default: return;
   }
   drawRun(run);
 }
+function waitHTML(p){
+  const left = Math.max(0, Math.round(p.until - Date.now()/1000));
+  const span = left>=3600 ? `${Math.floor(left/3600)}:${String(Math.floor(left%3600/60)).padStart(2,"0")}:${String(left%60).padStart(2,"0")}` : left>=60 ? `${Math.floor(left/60)}:${String(left%60).padStart(2,"0")}` : left+" "+t("sec");
+  return `<div class="waitbox"><span class="spin"></span><span dir="auto">${esc(fmt(t("waitMsg"),{r:p.title, a:p.attempt, m:p.max, s:span}))}</span><button class="btn small" data-waitcancel>${esc(t("waitCancel"))}</button></div>`;
+}
+setInterval(()=>{ if(S.running && S.running.parts.some(p=>p.kind==="wait")) drawRun(S.running); }, 1000);
 let drawPending = false;
 function drawRun(run){
   if(drawPending) return; drawPending = true;
   requestAnimationFrame(()=>{ drawPending = false;
-    run.body.innerHTML = run.parts.map(p=> p.kind==="tool"?toolHTML(p) : p.kind==="approval"?approvalHTML(p) : p.kind==="thinking"?`<div class="thinking">${esc(p.text)}</div>`
+    run.body.innerHTML = run.parts.map(p=> p.kind==="tool"?toolHTML(p) : p.kind==="approval"?approvalHTML(p) : p.kind==="wait"?waitHTML(p) : p.kind==="thinking"?`<div class="thinking">${esc(p.text)}</div>`
       : p.kind==="notice"?`<div class="notice">${esc(p.text)}</div>` : p.kind==="error"?`<div class="err">${esc(p.text)}</div>` : md(p.text)).join("")
       + (S.running===run?'<p class="cursor"></p>':"");
     wire(run.body);
+    run.body.querySelectorAll("[data-waitcancel]").forEach(b=>b.onclick=()=>stopRun());
     run.body.querySelectorAll("[data-ap]").forEach(b=>b.onclick=async()=>{
       const act = b.dataset.act, p = run.parts.find(x=>x.kind==="approval" && x.id===b.dataset.ap); if(!p || p.state) return;
       p.state = act==="deny" ? "deny" : "allow"; drawRun(run);

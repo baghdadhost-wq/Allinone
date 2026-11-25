@@ -156,6 +156,179 @@ def build_report_text(conv: Dict[str, Any], messages: List[Dict[str, Any]], head
     return "\n".join(out) + "\n"
 
 
+# ------------------------------------------------------------ interruptions
+CONTINUE_TEMPLATE = """انقطع تنفيذ المهمة السابقة قبل أن يكتمل (السبب: {reason}).
+تابع من النقطة التي توقفت عندها بالضبط:
+1. راجع آخر ما فعلته في هذه المحادثة، وتحقق من الحالة الفعلية للملفات في المجلد (لا تعتمد على الذاكرة وحدها).
+2. لا تُعِد خطوات اكتملت فعلاً، وأصلح أي ملف تركته نصف مكتوب.
+3. أكمل المهمة الأصلية حتى النهاية، ثم لخّص باختصار ما أُنجز وما بقي.
+إذا كانت المهمة قد اكتملت فعلاً فقل ذلك واذكر الدليل."""
+
+HANDOFF_TEMPLATE = """هذه مهمة بدأت في جلسة سابقة (ربما على بوابة أو نموذج آخر) وانقطعت. السبب: {reason}.
+فيما يلي ملف التسليم الذي يلخص ما طُلب وما أُنجز (محفوظ أيضاً في {file}).
+قبل أي عمل: تحقق من الحالة الفعلية للملفات في المجلد، ولا تكرر ما اكتمل، وأصلح ما بقي ناقصاً.
+
+{handoff}
+
+----- المطلوب الآن -----
+{message}"""
+
+RESUME_LABEL = "▶ متابعة"
+AUTO_RESUME_LABEL = "↻ متابعة تلقائية ({n}/{m})"
+
+# reason -> (title, retry automatically, wait seconds, how to resume, attempts)
+_REASONS = {
+    "closed": ("أُغلق Allinone أو توقف الجهاز أثناء العمل", False, 0, "continue", 0),
+    "stopped": ("أوقفتَ الرد يدوياً", False, 0, "continue", 0),
+    "gateway_down": ("البوابة توقفت أو لا تستجيب", True, 8, "continue", 3),
+    "rate_limit": ("وصل المزوّد إلى حد الطلبات", True, 60, "continue", 3),
+    "usage_limit": ("وصل حساب Claude إلى حد الاستخدام", True, 0, "continue", 1),
+    "network": ("انقطاع في الشبكة أو ضغط مؤقت على الخادم", True, 15, "continue", 3),
+    "auth": ("مشكلة في تسجيل الدخول أو المفتاح", False, 0, "continue", 0),
+    "context": ("المحادثة أطول من سياق النموذج", True, 0, "handoff", 1),
+    "session_missing": ("جلسة Claude Code السابقة غير موجودة", True, 0, "handoff", 1),
+    "max_turns": ("انتهى عدد الدورات المسموح", True, 0, "continue", 2),
+    "crash": ("خرج Claude Code بخطأ غير متوقع", True, 10, "continue", 1),
+}
+
+_ADVICE = {
+    ("gateway_down", "omniroute"): "سيعيد Allinone تشغيل OmniRoute ثم يتابع من الجلسة نفسها. إن تكرر فافتح لوحة التحكم وتحقق من المزوّدين.",
+    ("gateway_down", "freellmapi"): "سيعيد Allinone تشغيل FreeLLMAPI ثم يتابع. إن تكرر فتحقق من سجله ومن وجود مفاتيح مزوّدين.",
+    ("gateway_down", ""): "سيعيد Allinone تشغيل البوابة ثم يتابع من الجلسة نفسها.",
+    ("rate_limit", "omniroute"): "كل المزوّدين في الـcombo وصلوا الحد. سينتظر ويعيد المحاولة؛ وللحل الدائم أضف مزوّداً احتياطياً (fallback) في لوحة OmniRoute، أو اختر بوابة أخرى ثم «متابعة».",
+    ("rate_limit", "freellmapi"): "استُنفدت المفاتيح المجانية المتاحة مؤقتاً. سينتظر ويعيد المحاولة؛ وللحل الدائم أضف مفاتيح مزوّدين أكثر في FreeLLMAPI، أو اختر بوابة أخرى ثم «متابعة».",
+    ("rate_limit", "anthropic"): "حد طلبات مؤقت من Anthropic. سينتظر ويعيد المحاولة.",
+    ("rate_limit", ""): "سينتظر ويعيد المحاولة، أو اختر بوابة أخرى ثم «متابعة».",
+    ("usage_limit", "anthropic"): "سيُستأنف تلقائياً عند تجدد الحد إن بقيت نافذة Allinone مفتوحة. أو اختر OmniRoute أو FreeLLMAPI من الأعلى ثم «متابعة» لتكمل الآن بملف تسليم.",
+    ("auth", "anthropic"): "سجّل الدخول من زر «تسجيل الدخول» ثم اضغط «متابعة».",
+    ("auth", "omniroute"): "مفتاح OmniRoute غير مقبول. نفّذ: allinone key omniroute (أو افتح لوحة التحكم) ثم «متابعة».",
+    ("auth", "freellmapi"): "مفتاح FreeLLMAPI غير مقبول. نفّذ: allinone key freellmapi ثم «متابعة».",
+    ("auth", ""): "صحّح المفتاح أو تسجيل الدخول ثم اضغط «متابعة».",
+    ("context", ""): "سيبدأ جلسة جديدة بملف تسليم يلخص العمل السابق ويتابع منها.",
+    ("session_missing", ""): "سيبدأ جلسة جديدة بملف تسليم يلخص العمل السابق ويتابع منها.",
+    ("closed", ""): "اضغط «متابعة» ليكمل Claude Code من الجلسة نفسها؛ ما حُفظ قبل الانقطاع ظاهر أعلاه.",
+    ("stopped", ""): "اضغط «متابعة» متى أردت ليكمل من حيث توقف.",
+    ("network", ""): "سيعيد المحاولة تلقائياً بعد لحظات.",
+    ("max_turns", ""): "سيتابع تلقائياً في دورة جديدة.",
+    ("crash", ""): "سيعيد المحاولة مرة؛ إن تكرر فأنشئ 🧾 تقرير الأخطاء.",
+}
+
+
+def _parse_reset(text: str, now: Optional[float] = None) -> Optional[float]:
+    """When does a Claude usage limit reset? Understands `...limit reached|1735689600` and `resets 3pm`."""
+    now = time.time() if now is None else now
+    m = re.search(r"limit reached\|(\d{9,})", text)
+    if m:
+        return float(m.group(1))
+    m = re.search(r"resets?\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*([ap]m)", text, re.I)
+    if m:
+        hour = int(m.group(1)) % 12 + (12 if m.group(3).lower() == "pm" else 0)
+        lt = time.localtime(now)
+        target = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, hour, int(m.group(2) or 0), 0, 0, 0, -1))
+        return target + 86400 if target <= now else target
+    return None
+
+
+def diagnose(gw_type: str, text: str, gw_up: bool = True, stopped: bool = False, subtype: str = "",
+             closed: bool = False, now: Optional[float] = None) -> Dict[str, Any]:
+    """Why did a run stop, and how should it be resumed? Different gateways fail differently."""
+    low = (text or "").lower()
+    if closed:
+        reason = "closed"
+    elif stopped:
+        reason = "stopped"
+    elif "no conversation found" in low or "session not found" in low:
+        reason = "session_missing"
+    elif subtype == "error_max_turns" or "max turns" in low or "maximum number of turns" in low:
+        reason = "max_turns"
+    elif re.search(r"prompt is too long|context (length|window)|maximum context|too many tokens|context_length", low):
+        reason = "context"
+    elif re.search(r"usage limit|limit reached|hit your limit|5-hour limit|weekly limit", low) and gw_type == "anthropic":
+        reason = "usage_limit"
+    elif re.search(r"\b401\b|\b403\b|unauthori[sz]ed|invalid (api )?key|authentication|/login|not logged in|"
+                   r"oauth token|token (has )?expired|غير مسجّل", low):
+        reason = "auth"
+    elif re.search(r"\b429\b|rate.?limit|too many requests|quota|exhausted|no available (provider|key|model)|"
+                   r"all providers|usage limit|limit reached", low):
+        reason = "rate_limit"
+    elif not gw_up and gw_type != "anthropic":
+        reason = "gateway_down"
+    elif re.search(r"econnrefused|econnreset|etimedout|enotfound|fetch failed|socket hang up|network|timed? ?out|"
+                   r"\b5\d\d\b|overloaded|bad gateway|service unavailable|connection (error|refused|reset)", low):
+        reason = "network" if gw_up or gw_type == "anthropic" else "gateway_down"
+    else:
+        reason = "crash"
+    title, retry, wait, mode, attempts = _REASONS[reason]
+    gtype = gw_type if gw_type in ("omniroute", "freellmapi", "anthropic") else ""
+    advice = _ADVICE.get((reason, gtype)) or _ADVICE.get((reason, "")) or ""
+    resume_at = None
+    if reason == "usage_limit":
+        resume_at = _parse_reset(text, now)
+        if resume_at is None:
+            retry = False
+            advice = ("لم يُعرف وقت تجدد الحد. اختر OmniRoute أو FreeLLMAPI من الأعلى ثم «متابعة» لتكمل الآن، "
+                      "أو اضغط «متابعة» لاحقاً على Claude.")
+        else:
+            wait = max(0, int(resume_at - (time.time() if now is None else now)) + 30)
+    return {"reason": reason, "title": title, "advice": advice, "retry": retry, "wait": wait, "mode": mode,
+            "attempts": attempts, "resume_at": resume_at, "detail": (text or "")[-600:]}
+
+
+_EDIT_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
+
+
+def build_handoff_text(conv: Dict[str, Any], messages: List[Dict[str, Any]], reason: str,
+                       project: Optional[Dict[str, Any]] = None) -> str:
+    """A compact hand-over note so a fresh session (or another gateway/model) can finish the work."""
+    users = [m for m in messages if m["role"] == "user" and not (m.get("meta") or {}).get("resume")]
+    out = ["# ملف تسليم المهمة", "",
+           f"- المحادثة: {conv.get('title') or ''}", f"- مجلد العمل: {conv.get('project') or ''}",
+           f"- سبب الانقطاع: {reason}", f"- الوقت: {time.strftime('%Y-%m-%d %H:%M')}"]
+    if project:
+        out.append(f"- المشروع: {project.get('name')}")
+    if users:
+        out += ["", "## الهدف (الطلب الأول)", _clip(users[0].get("display") or "", 3000)]
+        if len(users) > 1:
+            out += ["", "## الطلبات اللاحقة بالترتيب"]
+            out += [f"{i}. {_clip(m.get('display') or '', 1200)}" for i, m in enumerate(users[1:], 2)]
+    todos, files, commands, errors = None, {}, [], []
+    last_text = ""
+    for m in messages:
+        if m["role"] != "assistant":
+            continue
+        for p in (m.get("meta") or {}).get("parts") or []:
+            if p.get("kind") == "tool":
+                inp = p.get("input") if isinstance(p.get("input"), dict) else {}
+                bad = _part_is_error(p)
+                if p.get("name") == "TodoWrite" and isinstance(inp.get("todos"), list):
+                    todos = inp["todos"]
+                elif p.get("name") in _EDIT_TOOLS and inp.get("file_path"):
+                    files[inp["file_path"]] = "✘ فشل" if bad else ("✔" if p.get("result") is not None else "… لم يكتمل")
+                elif p.get("name") == "Bash" and inp.get("command"):
+                    commands.append(("✘" if bad else "✔" if p.get("result") is not None else "…") + " " + _clip(inp["command"], 300))
+                if bad:
+                    errors.append(f"{p.get('name')}: {_clip(p.get('result') or '', 400)}")
+            elif p.get("kind") == "text" and (p.get("text") or "").strip():
+                if p.get("error"):
+                    errors.append(_clip(p["text"], 400))
+                else:
+                    last_text = p["text"]
+    if todos:
+        marks = {"completed": "✅", "in_progress": "⏳"}
+        out += ["", "## خطة العمل (آخر قائمة مهام)"]
+        out += [f"- {marks.get(t.get('status'), '☐')} {t.get('content') or t.get('activeForm') or ''}" for t in todos
+                if isinstance(t, dict)]
+    if files:
+        out += ["", "## الملفات التي عُدّلت أو أُنشئت"] + [f"- {v} {k}" for k, v in files.items()]
+    if commands:
+        out += ["", "## آخر الأوامر المنفّذة"] + [f"- {c}" for c in commands[-25:]]
+    if errors:
+        out += ["", "## آخر الأخطاء"] + [f"- {e}" for e in errors[-10:]]
+    if last_text:
+        out += ["", "## آخر ما كتبه المساعد", _clip(last_text, 3000)]
+    return "\n".join(out) + "\n"
+
+
 class StreamTranslator:
     """Turns Claude Code stream-json lines into the small event set the page understands,
     and collects the assistant message to store."""
@@ -239,6 +412,7 @@ class StreamTranslator:
                 "duration_ms": evt.get("duration_ms"),
                 "num_turns": evt.get("num_turns"),
                 "session_id": self.session_id,
+                "subtype": evt.get("subtype"),
             }
             if self.result["is_error"] and not self.final_text() and evt.get("result"):
                 self.parts.append({"kind": "text", "text": str(evt["result"]), "closed": True, "error": True})
@@ -273,6 +447,8 @@ class GuiApp:
         self.conv_allowed: Dict[int, set] = {}
         self.preapproved: set = set()
         self.run_approvals: Dict[str, List[Dict[str, Any]]] = {}
+        self.live: Dict[int, Dict[str, Any]] = {}
+        self.resume_cancel: Dict[int, threading.Event] = {}
         self.approval_timeout = 1800.0
         self.httpd = None
         self.stopped: set = set()
@@ -366,15 +542,61 @@ class GuiApp:
             tpl += "\n\n{answer}"
         return tpl.replace("{note}", note_line).replace("{answer}", answer).strip()
 
+    def auto_resume_cfg(self) -> Dict[str, Any]:
+        cfg = (self.ctx.cfg.get("gui") or {}).get("auto_resume")
+        cfg = cfg if isinstance(cfg, dict) else {"enabled": bool(cfg)} if cfg is not None else {}
+        return {"enabled": cfg.get("enabled", True), "max_attempts": int(cfg.get("max_attempts", 3)),
+                "max_wait_minutes": float(cfg.get("max_wait_minutes", 360))}
+
+    def handoff(self, conv_id: int, reason: str) -> Dict[str, str]:
+        store = self.store()
+        conv = store.conversation(conv_id)
+        proj = store.project(conv["project_id"]) if conv is not None and conv["project_id"] else None
+        text = build_handoff_text(dict(conv) if conv is not None else {}, store.messages(conv_id), reason,
+                                  dict(proj) if proj is not None else None)
+        self.transcripts.mkdir(parents=True, exist_ok=True)
+        path = self.transcripts / f"handoff-{conv_id}.md"
+        path.write_text(text, encoding="utf-8")
+        return {"text": text, "path": str(path)}
+
+    def handoff_prompt(self, conv_id: int, reason: str, message: str) -> str:
+        ho = self.handoff(conv_id, reason)
+        tpl = read_prompt(self.ctx, "handoff.txt", HANDOFF_TEMPLATE)
+        return (tpl.replace("{reason}", reason).replace("{file}", ho["path"]).replace("{handoff}", ho["text"])
+                .replace("{message}", message))
+
+    def continue_prompt(self, reason: str) -> str:
+        return read_prompt(self.ctx, "continue.txt", CONTINUE_TEMPLATE).replace("{reason}", reason)
+
+    def last_interruption(self, conv_id: int) -> Optional[Dict[str, Any]]:
+        for m in reversed(self.store().messages(conv_id)):
+            if m["role"] == "assistant":
+                return (m.get("meta") or {}).get("interrupted")
+        return None
+
+    def recover_interrupted(self) -> int:
+        """Replies that were running when Allinone closed: keep what was saved and offer to continue."""
+        count = 0
+        for m in self.store().unfinished_messages():
+            meta = m["meta"]
+            meta["running"] = False
+            meta["interrupted"] = diagnose(str(meta.get("gateway_type") or ""), "", closed=True)
+            self.store().update_message(m["id"], m["display"], meta)
+            count += 1
+        return count
+
     def chat(self, req: Dict[str, Any], emit) -> None:
         text = str(req.get("text") or "").strip()
         expert = req.get("expert") if isinstance(req.get("expert"), dict) else None
         expert_answer = str((expert or {}).get("answer") or "").strip()
+        resume_req = bool(req.get("resume"))
         if expert is not None:
             if not expert_answer:
                 emit({"type": "error", "text": tr("The uploaded answer is empty.", "الإجابة المرفوعة فارغة.")})
                 return
             text = text or tr("📥 External answer uploaded — apply it.", "📥 إجابة خارجية مرفوعة — طبّقها.")
+        if resume_req:
+            text = text or RESUME_LABEL
         if not text:
             emit({"type": "error", "text": tr("Empty message.", "الرسالة فارغة.")})
             return
@@ -383,6 +605,9 @@ class GuiApp:
         store = self.store()
         conv_id = int(req.get("conversation_id") or 0)
         conv = store.conversation(conv_id) if conv_id else None
+        if resume_req and conv is None:
+            emit({"type": "error", "text": tr("Nothing to continue.", "لا يوجد ما يُتابَع.")})
+            return
         project_id = conv["project_id"] if conv is not None else (int(req.get("project_id") or 0) or None)
         proj = store.project(project_id) if project_id else None
         if proj is None:
@@ -404,56 +629,127 @@ class GuiApp:
                 emit({"type": "error", "text": tr("This conversation is still running.", "هذه المحادثة ما زالت قيد التنفيذ.")})
                 return
             self.busy.add(conv_id)
-        run_id = secrets.token_hex(6)
+            cancel = self.resume_cancel[conv_id] = threading.Event()
+        write_lock = threading.Lock()
+        raw_emit = emit
+
+        def locked_emit(evt: Dict[str, Any]) -> None:
+            with write_lock:  # approvals arrive from another thread
+                raw_emit(evt)
+
+        emit = locked_emit
         try:
             deep, memory = bool(req.get("deep")), bool(req.get("memory"))
             attachments = [str(a) for a in (req.get("attachments") or [])]
-            body = self.expert_prompt(expert_answer, text if expert and req.get("text") else "") if expert else text
-            sent = self.build_prompt(conv_id, body, deep, memory, attachments)
+            switching = bool(conv["session_id"]) and conv["session_gateway"] != gw.name
+            force_new = False
+            if resume_req:
+                last = self.last_interruption(conv_id) or {}
+                reason = last.get("title") or tr("the previous run did not finish", "لم يكتمل التشغيل السابق")
+                if switching or last.get("mode") == "handoff" or not conv["session_id"]:
+                    body = self.handoff_prompt(conv_id, reason, self.continue_prompt(reason))
+                    force_new = True
+                else:
+                    body = self.continue_prompt(reason)
+                sent = body
+            else:
+                body = self.expert_prompt(expert_answer, text if expert and req.get("text") else "") if expert else text
+                sent = self.build_prompt(conv_id, body, deep, memory, attachments)
+                if switching and not memory and store.messages(conv_id):
+                    # Another gateway cannot reuse the session: send a hand-over note instead of starting blind.
+                    sent = self.handoff_prompt(conv_id, tr("switched gateway to {t}", "تغيير البوابة إلى {t}", t=gw.title), sent)
+                    force_new = True
+                    emit({"type": "notice", "text": tr(
+                        "New gateway → new Claude Code session, with a hand-over note of the work so far.",
+                        "بوابة مختلفة ← جلسة Claude Code جديدة، مع ملف تسليم يلخص العمل السابق.")})
             user_meta = {"deep": deep, "memory": memory, "attachments": attachments}
             if expert:
                 user_meta.update(expert=True, expert_chars=len(expert_answer))
+            if resume_req:
+                user_meta["resume"] = "handoff" if force_new else "continue"
             store.add_message(conv_id, "user", text, sent, user_meta)
-            emit({"type": "start", "run_id": run_id, "conversation_id": conv_id, "sent": sent})
 
-            resume = None
-            if conv["session_id"] and conv["session_gateway"] == gw.name:
-                resume = conv["session_id"]
-            elif conv["session_id"] and not memory:
-                emit({"type": "notice", "text": tr(
-                    "New gateway → new Claude Code session. Turn on Memory to send the earlier conversation along.",
-                    "بوابة مختلفة ← جلسة Claude Code جديدة. فعّل Memory لإرسال المحادثة السابقة معها.")})
-            try:
-                if flows.bring_up(self.ctx, gw, False):
-                    self.started_gateways.add(gw.name)
-            except (GatewayError, ClaudeError, RuntimeError) as exc:
-                emit({"type": "error", "text": str(exc), "need_login": gw.type_name == "anthropic"})
-                store.add_message(conv_id, "assistant", str(exc), meta={"error": True, "gateway": gw.name})
-                return
-            self.ctx.state.set("last_gateway", gw.name)
-
-            gui_cfg = self.ctx.cfg.get("gui") or {}
-            mode = str(req.get("permission_mode") or gui_cfg.get("permission_mode") or "acceptEdits")
-            if mode not in PERMISSION_MODES:
-                mode = "acceptEdits"
-            effort = str(req.get("effort") or "")
-            effort = effort if effort in EFFORTS else ""
-            allowed = list((self.ctx.cfg.get("tasks") or {}).get("allowed_tools") or [])
-            write_lock = threading.Lock()
-            raw_emit = emit
-
-            def locked_emit(evt: Dict[str, Any]) -> None:
-                with write_lock:  # approvals arrive from another thread
-                    raw_emit(evt)
-
-            emit = locked_emit
+            auto = self.auto_resume_cfg()
+            attempt = 0
+            while True:
+                diag = self._run_turn(conv_id, gw, model, project, project_id, sent, req, emit, force_new)
+                if diag is None or not auto["enabled"] or not diag["retry"] or cancel.is_set():
+                    break
+                if attempt >= min(auto["max_attempts"], diag["attempts"] or auto["max_attempts"]):
+                    emit({"type": "notice", "text": tr("Automatic resume gave up after {n} attempts.",
+                                                       "توقفت المتابعة التلقائية بعد {n} محاولات.", n=attempt)})
+                    break
+                if diag["wait"] > auto["max_wait_minutes"] * 60:
+                    break
+                attempt += 1
+                until = time.time() + diag["wait"]
+                with self.lock:
+                    self.live[conv_id] = {"waiting": {"until": until, "title": diag["title"], "attempt": attempt,
+                                                     "max": auto["max_attempts"]}}
+                emit({"type": "auto_resume", "wait": diag["wait"], "until": until, "attempt": attempt,
+                      "max": auto["max_attempts"], "title": diag["title"], "reason": diag["reason"]})
+                if cancel.wait(diag["wait"]):
+                    emit({"type": "notice", "text": tr("Automatic resume cancelled.", "أُلغيت المتابعة التلقائية.")})
+                    break
+                force_new = diag["mode"] == "handoff"
+                sent = (self.handoff_prompt(conv_id, diag["title"], self.continue_prompt(diag["title"])) if force_new
+                        else self.continue_prompt(diag["title"]))
+                label = AUTO_RESUME_LABEL.format(n=attempt, m=auto["max_attempts"])
+                store.add_message(conv_id, "user", label, sent, {"resume": diag["mode"], "auto": True})
+                emit({"type": "resume_start", "display": label, "sent": sent, "attempt": attempt})
+        finally:
             with self.lock:
-                self.run_emit[run_id] = locked_emit
-                self.run_conv[run_id] = conv_id
-                self.run_approvals[run_id] = []
-            approval = None
-            if mode != "bypassPermissions":
-                approval = {"url": self.base_url() + "/internal/approval", "token": self.token, "run_id": run_id}
+                self.busy.discard(conv_id)
+                self.live.pop(conv_id, None)
+                self.resume_cancel.pop(conv_id, None)
+
+    def _run_turn(self, conv_id: int, gw, model: Optional[str], project: Path, project_id: Optional[int],
+                  sent: str, req: Dict[str, Any], emit, force_new: bool = False) -> Optional[Dict[str, Any]]:
+        """One Claude Code run. Saves the reply as it streams; returns None on success or a diagnosis."""
+        store = self.store()
+        conv = store.conversation(conv_id)
+        run_id = secrets.token_hex(6)
+        emit({"type": "start", "run_id": run_id, "conversation_id": conv_id, "sent": sent})
+        base_meta = {"gateway": gw.name, "gateway_title": gw.title, "gateway_type": gw.type_name, "model": model or ""}
+        resume = conv["session_id"] if (conv["session_id"] and conv["session_gateway"] == gw.name and not force_new) else None
+        try:
+            if flows.bring_up(self.ctx, gw, False):
+                self.started_gateways.add(gw.name)
+        except (GatewayError, ClaudeError, RuntimeError) as exc:
+            diag = diagnose(gw.type_name, str(exc), gw_up=False)
+            if gw.type_name == "anthropic" and diag["reason"] == "crash":
+                diag = diagnose(gw.type_name, "not logged in " + str(exc))
+            emit({"type": "error", "text": str(exc), "need_login": gw.type_name == "anthropic"})
+            meta = {**base_meta, "error": True, "is_error": True, "interrupted": diag,
+                    "parts": [{"kind": "text", "text": str(exc), "closed": True, "error": True}]}
+            mid = store.add_message(conv_id, "assistant", str(exc), meta=meta)
+            emit({"type": "saved", "message_id": mid, "meta": meta})
+            return diag
+        self.ctx.state.set("last_gateway", gw.name)
+
+        gui_cfg = self.ctx.cfg.get("gui") or {}
+        mode = str(req.get("permission_mode") or gui_cfg.get("permission_mode") or "acceptEdits")
+        if mode not in PERMISSION_MODES:
+            mode = "acceptEdits"
+        effort = str(req.get("effort") or "")
+        effort = effort if effort in EFFORTS else ""
+        allowed = list((self.ctx.cfg.get("tasks") or {}).get("allowed_tools") or [])
+        tr_ = StreamTranslator()
+        # The reply is stored right away and updated while it streams, so nothing is lost if Allinone
+        # or the computer stops in the middle.
+        mid = store.add_message(conv_id, "assistant", "", meta={**base_meta, "running": True, "parts": tr_.parts})
+        with self.lock:
+            self.run_emit[run_id] = emit
+            self.run_conv[run_id] = conv_id
+            self.run_approvals[run_id] = []
+            self.live[conv_id] = {"run_id": run_id, "tr": tr_, "message_id": mid}
+        approval = None
+        if mode != "bypassPermissions":
+            approval = {"url": self.base_url() + "/internal/approval", "token": self.token, "run_id": run_id}
+        err_tail: List[str] = []
+        started = time.time()
+        proc = None
+        try:
             proc, session = self.ctx.claude().start_stream(gw, model, project, sent, resume=resume,
                                                            permission_mode=mode, allowed_tools=allowed,
                                                            effort=effort or None, approval=approval,
@@ -461,7 +757,6 @@ class GuiApp:
             with self.lock:
                 self.runs[run_id] = proc
                 self.run_gateways[run_id] = gw.name
-            err_tail: List[str] = []
 
             def _drain_err():
                 assert proc.stderr is not None
@@ -470,8 +765,7 @@ class GuiApp:
                     del err_tail[:-40]
 
             threading.Thread(target=_drain_err, daemon=True).start()
-            tr_ = StreamTranslator()
-            started = time.time()
+            last_save = time.time()
             try:
                 assert proc.stdout is not None
                 for raw in proc.stdout:
@@ -484,6 +778,13 @@ class GuiApp:
                         continue
                     for out in tr_.feed(evt):
                         emit(out)
+                        if out["type"] == "init" and tr_.session_id:
+                            # remember the session at once: a crash later can still be resumed from it
+                            store.update_conversation(conv_id, session_id=tr_.session_id, session_gateway=gw.name,
+                                                      gateway=gw.name, model=model or "")
+                        if out["type"] in ("tool_result", "tool_use") or time.time() - last_save > 2:
+                            store.update_message(mid, tr_.final_text(), {**base_meta, "running": True, "parts": tr_.parts})
+                            last_save = time.time()
                 proc.wait()
             finally:
                 for pipe in (proc.stdout, proc.stderr):
@@ -493,35 +794,66 @@ class GuiApp:
                     except OSError:
                         pass
                 session.cleanup()
-                self._deny_pending(run_id)
-                with self.lock:
-                    self.runs.pop(run_id, None)
-                    self.run_gateways.pop(run_id, None)
-                    self.run_emit.pop(run_id, None)
-                    self.run_conv.pop(run_id, None)
-                    approvals = self.run_approvals.pop(run_id, [])
-            stopped = run_id in self.stopped
-            if tr_.result is None:
-                msg = tr("Stopped.", "تم الإيقاف.") if stopped else "\n".join(err_tail[-15:]) or tr(
-                    "Claude Code exited with code {c}.", "خرج Claude Code بالرمز {c}.", c=proc.returncode)
-                if not stopped:
-                    emit({"type": "error", "text": msg, "need_login": "login" in msg.lower()})
-                tr_.result = {"type": "result", "is_error": not stopped, "result": msg,
-                              "duration_ms": int((time.time() - started) * 1000), "stopped": stopped}
-                if not tr_.final_text():
-                    tr_.parts.append({"kind": "text", "text": msg, "closed": True, "error": not stopped})
-            if tr_.session_id:
-                store.update_conversation(conv_id, session_id=tr_.session_id, session_gateway=gw.name,
-                                          gateway=gw.name, model=model or "")
-            meta = {"parts": tr_.parts, "gateway": gw.name, "gateway_title": gw.title,
-                    "model": model or tr_.model or gw.default_model(), "stopped": stopped, "approvals": approvals,
-                    **{k: tr_.result.get(k) for k in ("cost_usd", "duration_ms", "num_turns", "is_error")}}
-            mid = store.add_message(conv_id, "assistant", tr_.final_text(), meta=meta)
-            emit({"type": "saved", "message_id": mid, "meta": meta})
+        except (ClaudeError, OSError) as exc:
+            err_tail.append(str(exc))
         finally:
+            self._deny_pending(run_id)
             with self.lock:
-                self.busy.discard(conv_id)
+                self.runs.pop(run_id, None)
+                self.run_gateways.pop(run_id, None)
+                self.run_emit.pop(run_id, None)
+                self.run_conv.pop(run_id, None)
+                approvals = self.run_approvals.pop(run_id, [])
+                self.live.pop(conv_id, None)
+                stopped = run_id in self.stopped
                 self.stopped.discard(run_id)
+        returncode = proc.returncode if proc is not None else -1
+        if tr_.result is None:
+            msg = tr("Stopped.", "تم الإيقاف.") if stopped else "\n".join(err_tail[-15:]) or tr(
+                "Claude Code exited with code {c}.", "خرج Claude Code بالرمز {c}.", c=returncode)
+            if not stopped:
+                emit({"type": "error", "text": msg, "need_login": "login" in msg.lower()})
+            tr_.result = {"type": "result", "is_error": not stopped, "result": msg,
+                          "duration_ms": int((time.time() - started) * 1000), "stopped": stopped}
+            if not tr_.final_text():
+                tr_.parts.append({"kind": "text", "text": msg, "closed": True, "error": not stopped})
+        if tr_.session_id:
+            store.update_conversation(conv_id, session_id=tr_.session_id, session_gateway=gw.name,
+                                      gateway=gw.name, model=model or "")
+        diag = None
+        if stopped or tr_.result.get("is_error"):
+            detail = "\n".join([str(tr_.result.get("result") or ""), *err_tail[-15:]])
+            diag = diagnose(gw.type_name, detail, gw_up=gw.type_name == "anthropic" or gw.is_up(), stopped=stopped,
+                            subtype=str(tr_.result.get("subtype") or ""))
+            if diag["reason"] == "session_missing":
+                store.update_conversation(conv_id, session_id=None, session_gateway=None)
+        meta = {**base_meta, "parts": tr_.parts, "running": False,
+                "model": model or tr_.model or gw.default_model(), "stopped": stopped, "approvals": approvals,
+                **{k: tr_.result.get(k) for k in ("cost_usd", "duration_ms", "num_turns", "is_error")}}
+        if diag:
+            meta["interrupted"] = diag
+        store.update_message(mid, tr_.final_text(), meta)
+        emit({"type": "saved", "message_id": mid, "meta": meta})
+        return diag
+
+    def live_state(self, conv_id: int) -> Dict[str, Any]:
+        """For a page that (re)opens a conversation while its reply is still running."""
+        with self.lock:
+            live = dict(self.live.get(conv_id) or {})
+            running = conv_id in self.busy
+            run_id = live.get("run_id")
+            pending = [{"id": a, "tool": i["tool"], "input": i["input"]} for a, i in self.pending.items()
+                       if i["run_id"] == run_id] if run_id else []
+        tr_ = live.get("tr")
+        return {"running": running, "run_id": run_id, "parts": json.loads(json.dumps(tr_.parts)) if tr_ else [],
+                "pending": pending, "waiting": live.get("waiting")}
+
+    def cancel_resume(self, conv_id: int) -> bool:
+        with self.lock:
+            ev = self.resume_cancel.get(conv_id)
+        if ev is not None:
+            ev.set()
+        return ev is not None
 
     # ------------------------------------------------------------- approvals
     def base_url(self) -> str:
@@ -601,6 +933,9 @@ class GuiApp:
     def stop_run(self, run_id: str) -> bool:
         with self.lock:
             proc = self.runs.get(run_id)
+            conv = self.run_conv.get(run_id)
+            if conv is not None and conv in self.resume_cancel:
+                self.resume_cancel[conv].set()  # a stopped reply must not resume by itself
             if proc is None:
                 return False
             self.stopped.add(run_id)
@@ -881,7 +1216,7 @@ def make_handler(app: GuiApp):
                     pid = (query.get("project") or [""])[0]
                     rows = app.store().conversations(query=(query.get("q") or [""])[0],
                                                      project_id=int(pid) if pid.isdigit() else None)
-                    self._json(200, {"conversations": [dict(r) for r in rows]})
+                    self._json(200, {"conversations": [{**dict(r), "running": r["id"] in app.busy} for r in rows]})
                 elif m := re.fullmatch(r"/api/conversations/(\d+)", path):
                     cid = int(m.group(1))
                     conv = app.store().conversation(cid)
@@ -889,9 +1224,14 @@ def make_handler(app: GuiApp):
                         return self._json(404, {"error": "not found"})
                     data = dict(conv)
                     data["preapproved"] = cid in app.preapproved
+                    data["running"] = cid in app.busy
                     proj = app.store().project(conv["project_id"]) if conv["project_id"] else None
                     data["project_name"] = proj["name"] if proj is not None else ""
                     self._json(200, {"conversation": data, "messages": app.store().messages(cid)})
+                elif m := re.fullmatch(r"/api/conversations/(\d+)/live", path):
+                    self._json(200, app.live_state(int(m.group(1))))
+                elif m := re.fullmatch(r"/api/conversations/(\d+)/handoff", path):
+                    self._json(200, app.handoff(int(m.group(1)), tr("manual hand-over", "تسليم يدوي")))
                 elif path == "/api/projects":
                     self._json(200, {"projects": app.store().projects()})
                 elif m := re.fullmatch(r"/api/projects/(\d+)", path):
@@ -960,7 +1300,8 @@ def make_handler(app: GuiApp):
                 if path == "/api/chat":
                     return self._chat(body)
                 if path == "/api/stop":
-                    return self._json(200, {"ok": app.stop_run(str(body.get("run_id") or ""))})
+                    cancelled = app.cancel_resume(int(body.get("conversation_id") or 0))
+                    return self._json(200, {"ok": app.stop_run(str(body.get("run_id") or "")) or cancelled})
                 if path == "/api/gateway":
                     gw = app.ctx.gateway(body.get("name"))
                     if body.get("action") == "stop":
@@ -1058,6 +1399,10 @@ def make_handler(app: GuiApp):
 
 def serve(ctx, port: int = 0, open_browser: bool = True, project: Optional[Path] = None) -> int:
     app = GuiApp(ctx, project)
+    recovered = app.recover_interrupted()
+    if recovered:
+        ui.warn(tr("{n} reply(ies) were interrupted last time; open them and press Continue.",
+                   "{n} رد انقطع في المرة السابقة؛ افتحه واضغط «متابعة».", n=recovered))
     gui_cfg = ctx.cfg.get("gui") or {}
     wanted = int(port or gui_cfg.get("port") or 8787)
     try:
