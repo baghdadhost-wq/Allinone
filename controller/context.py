@@ -18,6 +18,8 @@ from .nodejs import NodeRuntime
 class Context:
     def __init__(self, cfg: Optional[Config] = None):
         self.cfg = cfg or Config()
+        from . import i18n
+        i18n.set_brand(str((self.cfg.get("branding") or {}).get("name") or ""))
         self.data_dir: Path = self.cfg.data_dir
         self.run_dir = self.data_dir / "run"
         self.logs_dir = self.data_dir / "logs"

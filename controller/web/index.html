@@ -357,7 +357,23 @@ const TOKEN = (()=>{ const m = location.hash.match(/t=([\w-]+)/); if(m){ session
 const LS = { get(k,d){ try{ const v = localStorage.getItem("aio-"+k); return v===null?d:JSON.parse(v);}catch(e){return d;} }, set(k,v){ try{ localStorage.setItem("aio-"+k, JSON.stringify(v)); }catch(e){} } };
 let S = {lang:"ar", state:null, gateway:null, conv:null, messages:[], running:null, auth:null, attachments:[], project:"",
   tab:"chats", view:"chat", projects:[], projectId:null, projectName:"", pview:null, preapprove:false, savedFolder:null};
-const t = k => (I18N[S.lang]||I18N.ar)[k] ?? k;
+/* Display name instead of "Claude"/"Anthropic" (config: branding.name). Commands, paths and the
+   real model ids sent to the server are not changed. */
+function BRAND(){ return (S.state && S.state.brand) || ""; }
+function brandText(s){
+  const b = BRAND(); if(!b || typeof s!=="string") return s;
+  return s.replace(/\bClaude\.ai\b/g, b + (S.lang==="ar"?" (ويب)":" (web)")).replace(/\b(Claude|Anthropic)\b/g, b);
+}
+const MODEL_RE = /\bclaude(?=[-_ .]?(?:\d|opus|sonnet|haiku|fable|mythos|instant|code|v\d))/gi;
+function maskModel(m){ const b = BRAND(); if(!b || !m) return m; return String(m).replace(MODEL_RE, b.toLowerCase()).replace(/\banthropic\//gi, b.toLowerCase()+"/"); }
+let MODELMAP = new Map();
+function realModel(v){
+  if(!v) return v; if(MODELMAP.has(v)) return MODELMAP.get(v);
+  const b = BRAND(); if(!b) return v;
+  const q = b.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
+  return v.replace(new RegExp("\\b"+q+"/","gi"), "anthropic/").replace(new RegExp("\\b"+q+"(?=[-_ .])","gi"), "claude");
+}
+const t = k => { const v = (I18N[S.lang]||I18N.ar)[k] ?? k; return typeof v==="string" ? brandText(v) : v; };
 
 async function api(path, opts={}){
   const res = await fetch(path, {method: opts.method||"GET", headers: {"X-Allinone-Token": TOKEN, "Content-Type":"application/json"}, body: opts.body?JSON.stringify(opts.body):undefined});
@@ -511,13 +527,14 @@ $("#quitBtn").onclick = async ()=>{
 async function refreshAuth(){ try{ S.auth = await api("/api/auth"+(S.account?"?account="+encodeURIComponent(S.account):"")); }catch(e){ S.auth = {loggedIn:false}; } renderPills(); }
 function pollAuth(n=0){ setTimeout(async()=>{ await refreshAuth(); if(!(S.auth&&S.auth.loggedIn) && n<60) pollAuth(n+1); else if(S.auth&&S.auth.loggedIn) banner(""); }, 3000); }
 async function loadModels(){
-  if(S.gateway===WEB){ $("#model").value=""; $("#model").placeholder="claude.ai"; $("#modelList").innerHTML=""; return; }
+  if(S.gateway===WEB){ $("#model").value=""; $("#model").placeholder=brandText("Claude.ai"); $("#modelList").innerHTML=""; return; }
   const g = gwInfo(S.gateway); const input = $("#model");
   input.value = LS.get("model:"+S.gateway, "");
-  input.placeholder = (g && g.default_model) || t("gwDefault");
+  input.placeholder = maskModel((g && g.default_model)) || t("gwDefault");
   $("#modelList").innerHTML = "";
   try{ const r = await api("/api/models?gateway="+encodeURIComponent(S.gateway));
-    $("#modelList").innerHTML = (r.models||[]).slice(0,400).map(m=>`<option value="${esc(m)}">`).join(""); }catch(e){}
+    MODELMAP = new Map((r.models||[]).map(m=>[maskModel(m), m]));
+    $("#modelList").innerHTML = (r.models||[]).slice(0,400).map(m=>`<option value="${esc(maskModel(m))}">`).join(""); }catch(e){}
 }
 $("#model").onchange = e=>LS.set("model:"+S.gateway, e.target.value.trim());
 
@@ -633,7 +650,7 @@ function renderProjectView(){
         <label>${esc(t("projInstr"))}</label><textarea id="pvInstr" dir="auto">${esc(p.instructions||"")}</textarea>
         <label>${esc(t("projFolder"))}</label><div style="display:flex;gap:6px"><input id="pvFolder" dir="ltr" value="${esc(p.folder||"")}"><button class="btn small" id="pvBrowse">📁</button></div>
         <label>${esc(t("projGw"))}</label><select id="pvGw">${gwOpts}</select>
-        <label>${esc(t("projModel"))}</label><input id="pvModel" dir="ltr" value="${esc(p.model||"")}" placeholder="${esc(t("keepDefault"))}">
+        <label>${esc(t("projModel"))}</label><input id="pvModel" dir="ltr" value="${esc(maskModel(p.model||""))}" placeholder="${esc(t("keepDefault"))}">
         <label>🔁 ${esc(t("projVerify"))}</label><input id="pvVerify" dir="ltr" value="${esc(p.verify_command||"")}" placeholder="npm test">
         <label>👁 ${esc(t("projApp"))}</label><input id="pvApp" dir="ltr" value="${esc(p.app_command||"")}" placeholder="npm run dev">
         <label>👁 ${esc(t("projUrl"))}</label><input id="pvUrl" dir="ltr" value="${esc(p.app_url||"")}" placeholder="http://localhost:5173/">
@@ -651,7 +668,7 @@ function renderProjectView(){
   $("#pvChat").onclick = ()=>startProjectChat(p);
   $("#pvSave").onclick = async ()=>{
     try{ const r = await api("/api/projects/"+p.id,{method:"POST",body:{name:$("#pvName").value, description:$("#pvDesc").value, instructions:$("#pvInstr").value,
-        folder:$("#pvFolder").value.trim(), gateway:$("#pvGw").value, model:$("#pvModel").value.trim(), verify_command:$("#pvVerify").value.trim(),
+        folder:$("#pvFolder").value.trim(), gateway:$("#pvGw").value, model:realModel($("#pvModel").value.trim()), verify_command:$("#pvVerify").value.trim(),
         app_command:$("#pvApp").value.trim(), app_url:$("#pvUrl").value.trim(), app_kind:$("#pvKind").value, visual_steps:$("#pvSteps").value}});
       S.pview = r.project; renderProjectView(); $("#pvMsg").textContent = t("projSaved"); loadProjects(); }catch(e){ $("#pvMsg").textContent = e.message; }
   };
@@ -807,7 +824,7 @@ $("#answerFile").onchange = async e=>{
 };
 
 /* ---------- rendering ---------- */
-function banner(text, isErr){ const b = $("#banner"); if(!text){ b.classList.remove("show"); return; } b.textContent = text; b.classList.add("show"); b.style.borderColor = isErr?"var(--err)":""; }
+function banner(text, isErr){ const b = $("#banner"); if(!text){ b.classList.remove("show"); return; } b.textContent = brandText(text); b.classList.add("show"); b.style.borderColor = isErr?"var(--err)":""; }
 function SHOWALL(){ return $("#showSent").checked; }
 function userHTML(m){
   const meta = m.meta||{}; const showSent = SHOWALL() && m.sent && m.sent!==m.display;
@@ -832,7 +849,7 @@ function approvalHTML(p){
   return `<div class="approval ${p.state?"done":""}"><div class="ap-h">🔐 ${esc(t("apTitle"))} <b dir="ltr">${esc(p.tool)}</b></div><pre>${esc(String(detail)+extra)}</pre>${state}</div>`;
 }
 function metaHTML(meta, text){
-  const bits = [meta.gateway_title||meta.gateway, meta.model, meta.duration_ms?((meta.duration_ms/1000).toFixed(1)+" "+t("sec")):"", meta.num_turns?(meta.num_turns+" "+t("turns")):"", meta.cost_usd?("$"+Number(meta.cost_usd).toFixed(4)):""].filter(Boolean);
+  const bits = [brandText(meta.gateway_title||meta.gateway), maskModel(meta.model), meta.duration_ms?((meta.duration_ms/1000).toFixed(1)+" "+t("sec")):"", meta.num_turns?(meta.num_turns+" "+t("turns")):"", meta.cost_usd?("$"+Number(meta.cost_usd).toFixed(4)):""].filter(Boolean);
   return `<div class="meta"><span>${bits.map(esc).join(" · ")}</span><button data-copytext>${esc(t("copy"))}</button><button data-mem>${esc(t("toMemory"))}</button></div>`;
 }
 function imgURL(p){ return "/api/image?path="+encodeURIComponent(p)+"&t="+encodeURIComponent(TOKEN); }
@@ -884,7 +901,7 @@ function interruptHTML(meta){
 function assistantHTML(m, isLast){
   const meta = m.meta||{}; const parts = meta.parts || [{kind:"text", text:m.display}];
   const all = SHOWALL() || meta.bridge_run;
-  const body = parts.filter(p=>all || p.kind!=="tool").map(p=>p.kind==="tool"?toolHTML(p):(p.error?`<div class="err">${esc(p.text)}</div>`:md(p.text))).join("");
+  const body = parts.filter(p=>all || p.kind!=="tool").map(p=>p.kind==="tool"?toolHTML(p):(p.error?`<div class="err">${esc(brandText(p.text))}</div>`:md(brandText(p.text)))).join("");
   if(!all){  // only the answer
     const intrQ = (isLast && meta.interrupted && !S.running) ? interruptHTML(meta) : "";
     if(!body && !intrQ) return "";
@@ -976,7 +993,7 @@ async function send(extra){
   const el = document.createElement("div"); el.className = "msg assistant"; el.innerHTML = `<div class="body"><p class="cursor"></p></div>`;
   const run = {el, body: el.querySelector(".body"), parts: [], runId:null};
   S.running = run; if(!expert && !resume){ input.value=""; autosize(); } updateSend(); renderThread();
-  const payload = {text, gateway:S.gateway, model:$("#model").value.trim(), effort:$("#effort").value, permission_mode:$("#perm").value,
+  const payload = {text, gateway:S.gateway, model:realModel($("#model").value.trim()), effort:$("#effort").value, permission_mode:$("#perm").value,
     deep, memory, attachments:atts, project:S.project, conversation_id:S.conv, resume,
     project_id:S.projectId, preapprove:S.preapprove, verify:$("#verify").checked, visual:$("#visual").checked, account:S.account};
   if(expert) payload.expert = expert;
@@ -1045,7 +1062,7 @@ function drawRun(run){
     const lastTool = tools[tools.length-1];
     const activity = (!all && S.running===run && lastTool) ? `<div class="notice" dir="auto">${esc(t("working"))} ${esc(lastTool.name||"")} <span dir="ltr">${esc(String((lastTool.input&&(lastTool.input.command||lastTool.input.file_path||lastTool.input.url))||"").slice(0,70))}</span> · ${esc(fmt(t("workingN"),{n:tools.length}))}</div>` : "";
     run.body.innerHTML = activity + shown.map(p=> p.kind==="tool"?toolHTML(p) : p.kind==="approval"?approvalHTML(p) : p.kind==="wait"?waitHTML(p) : p.kind==="visual"?visualHTML(p.entry) : p.kind==="thinking"?`<div class="thinking">${esc(p.text)}</div>`
-      : p.kind==="notice"?`<div class="notice">${esc(p.text)}</div>` : p.kind==="error"?`<div class="err">${esc(p.text)}</div>` : md(p.text||"")).join("")
+      : p.kind==="notice"?`<div class="notice">${esc(brandText(p.text))}</div>` : p.kind==="error"?`<div class="err">${esc(brandText(p.text))}</div>` : md(brandText(p.text||""))).join("")
       + (S.running===run?'<p class="cursor"></p>':"");
     wire(run.body);
     run.body.querySelectorAll("[data-waitcancel]").forEach(b=>b.onclick=()=>stopRun());

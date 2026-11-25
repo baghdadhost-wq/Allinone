@@ -150,6 +150,20 @@ class GuiServerTests(unittest.TestCase):
         self.assertNotIn("--resume", rec["argv"])
         self.assertTrue(rec["env"]["CLAUDE_CONFIG_DIR"].endswith("claude-home"))
 
+    def test_state_carries_display_name(self):
+        from controller import i18n
+        i18n.set_brand("smarter")
+        self.addCleanup(lambda: i18n.set_brand(""))
+        st = json.loads(self.call("/api/state")[1])
+        self.assertEqual(st["brand"], "smarter")
+        ev = self.chat(text="please USE_TOOL", gateway="fake", model="claude-sonnet-4-5")
+        conv_id = self.of(ev, "conversation")[0]["id"]
+        self.assertEqual(self.sb.read_record()["env"]["ANTHROPIC_MODEL"], "claude-sonnet-4-5")  # the real id is used
+        report = json.loads(self.call(f"/api/conversations/{conv_id}/report", {})[1])["text"]
+        self.assertNotIn("Claude", report)
+        self.assertNotIn("claude-sonnet", report)
+        self.assertIn("smarter-sonnet-4-5", report)
+
     def test_several_claude_accounts(self):
         os.environ["FAKE_AUTH"] = "1"
         self.addCleanup(lambda: os.environ.pop("FAKE_AUTH", None))
@@ -821,6 +835,25 @@ class VerifyHookTests(unittest.TestCase):
         c = self.v.signature("Traceback...\nKeyError: 'name'")
         self.assertEqual(a, b)
         self.assertNotEqual(a, c)
+
+
+class BrandingTests(unittest.TestCase):
+    def tearDown(self):
+        from controller import i18n
+        i18n.set_brand("")
+
+    def test_display_name_hides_the_real_one_but_not_commands(self):
+        from controller import i18n
+        i18n.set_brand("smarter")
+        self.assertEqual(i18n.tr("Claude Code is not installed. Run: allinone install claude",
+                                 "Claude Code غير مثبت. نفّذ: allinone install claude"),
+                         "smarter Code غير مثبت. نفّذ: allinone install claude" if i18n.language() == "ar"
+                         else "smarter Code is not installed. Run: allinone install claude")
+        self.assertEqual(i18n.tr("{p}", "{p}", p="/home/me/Claude/x"), "/home/me/Claude/x")   # values untouched
+        self.assertEqual(i18n.mask_models("anthropic/claude-sonnet-4-5 · claude-opus-4"), "smarter/smarter-sonnet-4-5 · smarter-opus-4")
+        self.assertNotIn("Anthropic", i18n.brand("حساب Anthropic"))
+        i18n.set_brand("")
+        self.assertEqual(i18n.brand("Claude"), "Claude")                                        # empty = real name
 
 
 class VisualPieces(unittest.TestCase):

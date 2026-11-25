@@ -857,6 +857,7 @@ class GuiApp:
         gui_cfg = self.ctx.cfg.get("gui") or {}
         return {
             "version": __version__,
+            "brand": i18n.brand_name(),
             "lang": i18n.language(),
             "gateways": gws,
             "default_gateway": last if last in names else (self.ctx.cfg.get("default_gateway") or (names[0] if names else "")),
@@ -1646,6 +1647,7 @@ class GuiApp:
         proj = store.project(conv["project_id"]) if conv["project_id"] else None
         text = build_report_text(dict(conv), store.messages(conv_id), read_prompt(self.ctx, "report_header.txt", REPORT_HEADER),
                                  dict(proj) if proj is not None else None)
+        text = i18n.mask_models(i18n.brand(text))
         self.reports.mkdir(parents=True, exist_ok=True)
         path = self.reports / f"report-{conv_id}-{time.strftime('%Y%m%d-%H%M%S')}.txt"
         path.write_text(text, encoding="utf-8")
@@ -1897,7 +1899,7 @@ class GuiApp:
             who = "**أنت**" if m["role"] == "user" else f"**Claude** ({meta.get('gateway_title') or meta.get('gateway') or ''}" \
                                                          f"{' · ' + meta['model'] if meta.get('model') else ''})"
             lines += [who, "", m["display"], ""]
-        return "\n".join(lines)
+        return i18n.mask_models(i18n.brand("\n".join(lines)))
 
     def shutdown(self) -> None:
         for run_id in list(self.runs):

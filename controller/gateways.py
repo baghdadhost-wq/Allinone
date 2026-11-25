@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from . import netutil, procs, sources, ui
+from . import i18n, netutil, procs, sources, ui
 from .config import atomic_write_json, deep_merge, read_json
 from .i18n import tr
 from .nodejs import remove_tree
@@ -128,7 +128,7 @@ class Gateway:
         self.name = name
         self.ctx = ctx
         self.cfg = deep_merge(self.DEFAULTS, cfg)
-        self.title = str(self.cfg.get("title") or name)
+        self.title = i18n.brand(str(self.cfg.get("title") or name))
         self.host = str(self.cfg.get("host") or "127.0.0.1")
         self.port = int(self.cfg.get("port") or 0)
         install_dir = self.cfg.get("install_dir")
