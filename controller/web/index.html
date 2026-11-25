@@ -157,6 +157,17 @@ main{flex:1;display:flex;flex-direction:column;min-width:0}
 .modal .mbtns{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 .modal .muted{color:var(--muted);font-size:12.5px}
 @media (max-width:760px){.pgrid{grid-template-columns:1fr}}
+.hochip{display:none;max-width:820px;margin:0 auto 6px;font-size:12.5px;color:var(--muted)}
+.hochip.show{display:flex;gap:8px;align-items:center}
+.hochip button{border:0;background:transparent;color:var(--muted)}
+.ctxwarn{border:1px solid var(--accent);border-radius:12px;padding:9px 12px;margin:8px 0;font-size:13.5px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.krow{display:grid;grid-template-columns:1fr auto auto;gap:8px;align-items:center;padding:6px 0;border-bottom:1px solid var(--line);font-size:13.5px}
+.krow .kn b{font-weight:600}
+.krow .kn small{color:var(--muted);display:block}
+.krow.done{opacity:.65}
+.kadd{display:flex;gap:6px;grid-column:1/-1}
+.kadd input{flex:1}
+.kstat{font-size:15px;font-weight:600;margin:4px 0 8px}
 .bfiles{font-size:13px;margin:6px 0;display:flex;flex-direction:column;gap:3px}
 .bfiles .bf{display:flex;gap:8px;align-items:center}
 .bfiles code{direction:ltr;unicode-bidi:isolate}
@@ -214,6 +225,7 @@ pre.vout{white-space:pre-wrap;direction:ltr;text-align:left;max-height:200px;ove
       <div id="gwPills"></div>
       <button class="btn small" id="gwPower"></button>
       <select id="account" class="btn small" style="display:none"></select>
+      <button class="btn small" id="keysBtn" style="display:none"></button>
       <button class="btn small" id="gwAction"></button>
       <span class="spacer"></span>
       <button class="btn small" id="preBtn"></button>
@@ -226,6 +238,7 @@ pre.vout{white-space:pre-wrap;direction:ltr;text-align:left;max-height:200px;ove
     <section id="messages"><div class="wrap" id="thread"></div></section>
     <footer id="composer">
       <div id="projChip"></div>
+      <div id="hoChip" class="hochip"></div>
       <div id="chips"></div>
       <div class="box">
         <textarea id="input" rows="1"></textarea>
@@ -233,6 +246,7 @@ pre.vout{white-space:pre-wrap;direction:ltr;text-align:left;max-height:200px;ove
           <button class="btn small ghost" id="attachBtn" title="">📎</button>
           <input type="file" id="fileInput" multiple hidden>
           <button class="btn small ghost" id="answerBtn">📥</button>
+          <label class="toggle" id="tFailover"><input type="checkbox" id="failover">↪ <span data-i="failover"></span></label>
           <label class="toggle" id="tVisual"><input type="checkbox" id="visual">👁 <span data-i="visual"></span></label>
           <label class="toggle" id="tVerify"><input type="checkbox" id="verify">🔁 <span data-i="verify"></span></label>
           <label class="toggle" id="tDeep"><input type="checkbox" id="deep">🧠 <span data-i="deep"></span></label>
@@ -258,6 +272,14 @@ const I18N = {
     vRound:"🔁 تحقق آلي (الجولة {n})", vPass:"✔ نجح", vFail:"✘ فشل (رمز {code}) — أُعيد الخطأ إلى النموذج ليصلحه", vSelf:"🔎 لا يوجد أمر تحقق؛ طُلب من النموذج أن يجرّب النتيجة بنفسه",
     vBadge:{passed:"✔ تم التحقق", failed:"✘ فشل التحقق بعد {n} جولات", fixing:"✘ آخر تحقق فشل", self:"🔎 جرّبه النموذج بنفسه", skipped:"", none:""},
     projVerify:"أمر التحقق (مثل npm test أو pytest — فارغ = اكتشاف تلقائي)",
+    failover:"تحويل تلقائي", failoverTip:"إذا نفدت كل نماذج البوابة (429) أو توقفت، ينتقل العمل تلقائياً إلى البوابة التالية (FreeLLMAPI ← OmniRoute ← Claude) مع ملف تسليم يلخص ما أُنجز.",
+    keys:"🔑 المفاتيح", keysTitle:"🔑 مفاتيح FreeLLMAPI — نماذج تدعم الأدوات", keysUsable:"نماذج صالحة الآن (تدعم الأدوات ولها مفتاح): {n}",
+    keysKeyless:"⚡ تفعيل المزوّدين الذين لا يحتاجون مفتاحاً ({n})", keysKeylessNone:"كل المزوّدين بلا مفتاح مفعّلون.",
+    keysHelp:"المزوّدون مرتبون حسب عدد نماذجهم التي تدعم الأدوات. افتح صفحة المفتاح، أنشئه بحسابك، والصقه هنا.", keysOpen:"🔗 صفحة المفتاح", keysPaste:"الصق المفتاح…", keysAdd:"إضافة",
+    keysTools:"{n} نموذجاً يدعم الأدوات", keysHave:"✔ مضاف ({k})", keysAdded:"أُضيف ✔ — نماذج متاحة الآن: {n}", keysNeedCred:"اكتب بريد وكلمة مرور لوحة FreeLLMAPI (مرة واحدة):",
+    keysEmail:"البريد", keysPass:"كلمة المرور", keysSave:"حفظ", keysLoading:"جارٍ تشغيل FreeLLMAPI وقراءة المزوّدين…",
+    fastLabel:"⚡ الأسرع مع الأدوات (Allinone)", ctxWarn:"📏 المحادثة صارت كبيرة (≈{n} توكن من {m}). الطلبات الكبيرة أبطأ وترفضها نماذج كثيرة.", ctxNew:"↪ محادثة جديدة تكمل من هنا",
+    hoFrom:"↪ تكمل من: {t}", reportShort:"تقرير مختصر (الأخطاء وما قبلها فقط)",
     webPill:"🌐 Claude.ai يدوي", webTip:"أي حساب Claude في المتصفح (المجاني أيضاً). Allinone يجهّز الطلب كاملاً، وأنت تلصقه في Claude.ai وتلصق الجواب هنا، فتُكتب الملفات في مشروعك على جهازك. تستطيع المتابعة من حساب آخر في أي وقت.",
     webTitle:"🌐 Claude.ai — أي حساب، والمشروع على جهازك", webStep1:"١- انسخ الطلب والصقه في محادثة جديدة في Claude.ai (أي حساب).", webCopy:"📋 نسخ وفتح Claude.ai", webDl:"⬇ تنزيل الطلب كملف",
     webBig:"الطلب كبير؛ إن رفض Claude.ai لصقه فنزّله كملف وأرفقه في المحادثة.", webInfo:"{c} حرف · {f} ملفات من المشروع", webStep2:"٢- عندما يرد Claude اضغط زر النسخ أسفل رده، ثم الصقه هنا:",
@@ -307,6 +329,14 @@ const I18N = {
     vRound:"🔁 Automatic check (round {n})", vPass:"✔ passed", vFail:"✘ failed (code {code}) — sent back to the model to fix", vSelf:"🔎 No check command; the model was asked to test its own result",
     vBadge:{passed:"✔ Verified", failed:"✘ Verification failed after {n} rounds", fixing:"✘ Last check failed", self:"🔎 Self-tested by the model", skipped:"", none:""},
     projVerify:"Check command (e.g. npm test or pytest — empty = detect)",
+    failover:"Auto switch", failoverTip:"When every model of the gateway is busy (429) or it stops, the work moves on its own to the next gateway (FreeLLMAPI → OmniRoute → Claude) with a hand-over note.",
+    keys:"🔑 Keys", keysTitle:"🔑 FreeLLMAPI keys — tool-capable models", keysUsable:"Usable models now (tool-capable, with a key): {n}",
+    keysKeyless:"⚡ Enable the providers that need no key ({n})", keysKeylessNone:"All no-key providers are enabled.",
+    keysHelp:"Providers are sorted by how many tool-capable models they offer. Open the key page, create the key with your account and paste it here.", keysOpen:"🔗 Key page", keysPaste:"Paste the key…", keysAdd:"Add",
+    keysTools:"{n} tool-capable models", keysHave:"✔ added ({k})", keysAdded:"Added ✔ — usable models now: {n}", keysNeedCred:"Type the FreeLLMAPI dashboard e-mail and password (once):",
+    keysEmail:"E-mail", keysPass:"Password", keysSave:"Save", keysLoading:"Starting FreeLLMAPI and reading providers…",
+    fastLabel:"⚡ Fastest with tools (Allinone)", ctxWarn:"📏 This chat is large (≈{n} tokens of {m}). Large requests are slower and many models refuse them.", ctxNew:"↪ New chat that continues from here",
+    hoFrom:"↪ Continues from: {t}", reportShort:"Short report (errors and the step before only)",
     webPill:"🌐 Claude.ai by hand", webTip:"Any Claude account in the browser (free too). Allinone prepares the whole request; you paste it into Claude.ai and paste the answer here, and the files are written into your project on your computer. Continue from another account any time.",
     webTitle:"🌐 Claude.ai — any account, the project stays on your computer", webStep1:"1. Copy the request and paste it into a new Claude.ai chat (any account).", webCopy:"📋 Copy & open Claude.ai", webDl:"⬇ Download the request as a file",
     webBig:"The request is large; if Claude.ai refuses the paste, download it and attach the file instead.", webInfo:"{c} characters · {f} project files", webStep2:"2. When Claude answers, press the copy button under its answer and paste it here:",
@@ -428,7 +458,7 @@ function applyLang(){
   document.querySelectorAll("[data-i]").forEach(e=>e.textContent=t(e.dataset.i));
   $("#newChat").textContent=t("newChat"); $("#search").placeholder=t("search"); $("#input").placeholder=t("placeholder");
   $("#langBtn").textContent = S.lang==="ar"?"EN":"ع"; $("#attachBtn").title=t("attach"); $("#quitBtn").textContent=t("quit");
-  $("#tSent").title=t("showSentTip"); $("#tVerify").title=t("verifyTip"); $("#tVisual").title=t("visualTip"); renderVisualToggle(); $("#answerBtn").title=t("answerTip"); $("#answerBtn").textContent="📥 "+t("answer"); $("#reportBtn").textContent=t("report"); $("#reportBtn").title=t("reportTip"); $("#preBtn").title=t("preTip");
+  $("#tSent").title=t("showSentTip"); $("#tFailover").title=t("failoverTip"); $("#keysBtn").textContent=t("keys"); $("#tVerify").title=t("verifyTip"); $("#tVisual").title=t("visualTip"); renderVisualToggle(); $("#answerBtn").title=t("answerTip"); $("#answerBtn").textContent="📥 "+t("answer"); $("#reportBtn").textContent=t("report"); $("#reportBtn").title=t("reportTip"); $("#preBtn").title=t("preTip");
   $("#newChat").textContent = S.tab==="projects" ? t("newProject") : t("newChat");
   fillSelects(); renderPills(); renderPre(); renderProjChip(); S.view==="project" ? renderProjectView() : renderThread();
 }
@@ -447,7 +477,7 @@ $("#effort").onchange = e=>LS.set("effort", e.target.value);
 $("#perm").onchange = e=>LS.set("perm", e.target.value);
 
 /* ---------- toggles ---------- */
-for(const [id, key] of [["visual","visual"],["verify","verify"],["deep","deep"],["memory","memory"],["showSent","showSent"]]){
+for(const [id, key] of [["failover","failover"],["visual","visual"],["verify","verify"],["deep","deep"],["memory","memory"],["showSent","showSent"]]){
   const box = $("#"+id); box.checked = LS.get(key, key==="verify" || key==="visual");
   const lab = box.closest(".toggle"); lab.classList.toggle("on", box.checked);
   box.onchange = ()=>{ LS.set(key, box.checked); lab.classList.toggle("on", box.checked); if(key==="showSent"){ renderThread(); if(S.running) drawRun(S.running); } };
@@ -487,6 +517,7 @@ function renderPills(){
   document.querySelectorAll(".pill").forEach(b=>b.onclick=()=>selectGateway(b.dataset.gw));
   const g = gwInfo(S.gateway); const act = $("#gwAction"); const pw = $("#gwPower");
   renderAccounts();
+  $("#keysBtn").style.display = (g && g.type==="freellmapi") ? "" : "none";
   if(!g){ act.style.display="none"; pw.style.display="none"; return; } act.style.display="";
   if(g.type==="anthropic" || !g.can_start || !g.installed){ pw.style.display="none"; }
   else { pw.style.display=""; pw.textContent = g.up ? t("powerOff") : t("powerOn"); pw.classList.toggle("on", g.up); }
@@ -534,7 +565,9 @@ async function loadModels(){
   $("#modelList").innerHTML = "";
   try{ const r = await api("/api/models?gateway="+encodeURIComponent(S.gateway));
     MODELMAP = new Map((r.models||[]).map(m=>[maskModel(m), m]));
-    $("#modelList").innerHTML = (r.models||[]).slice(0,400).map(m=>`<option value="${esc(maskModel(m))}">`).join(""); }catch(e){}
+    const extra = g && g.type==="freellmapi" ? [[S.state.fast_model, t("fastLabel")]] : g && g.type==="omniroute" ? [["auto/coding","auto/coding — combo"],["auto/fast","auto/fast — combo"]] : [];
+    $("#modelList").innerHTML = extra.map(([v,l])=>`<option value="${esc(v)}" label="${esc(l)}">`).join("")
+      + (r.models||[]).slice(0,400).map(m=>`<option value="${esc(maskModel(m))}">`).join(""); }catch(e){}
 }
 $("#model").onchange = e=>LS.set("model:"+S.gateway, e.target.value.trim());
 
@@ -691,6 +724,57 @@ function startProjectChat(p){
   if(p.model) $("#model").value = p.model;
   newChat(true);
 }
+function renderHoChip(){
+  const c = $("#hoChip");
+  if(!S.handoffFrom || S.conv){ c.classList.remove("show"); c.innerHTML=""; return; }
+  c.innerHTML = `${esc(fmt(t("hoFrom"),{t:S.handoffFrom.title||"…"}))} <button id="hoX">✕</button>`; c.classList.add("show");
+  $("#hoX").onclick = ()=>{ S.handoffFrom = null; renderHoChip(); };
+}
+function ctxWarnHTML(meta){
+  const n = meta.context_tokens||0; const lim = meta.context_limit || (meta.gateway_type==="anthropic" ? 200000 : 0);
+  const ratio = (S.state.context && S.state.context.warn_ratio) || 0.6;
+  if(!n || !lim || n < lim*ratio) return "";
+  return `<div class="ctxwarn"><span dir="auto">${esc(fmt(t("ctxWarn"),{n:n.toLocaleString(), m:lim.toLocaleString()}))}</span><button class="btn small primary" data-ctxnew>${esc(t("ctxNew"))}</button></div>`;
+}
+document.addEventListener("click", e=>{
+  if(!e.target.closest("[data-ctxnew]") || S.running || !S.conv) return;
+  const conv = S.conv; const title = ($(".conv.active .t")||{}).textContent || "";
+  newChat(true); S.handoffFrom = {id:conv, title}; renderHoChip(); input.focus();
+});
+$("#keysBtn").onclick = ()=>openKeys();
+async function openKeys(msg){
+  openModal(`<h3>${esc(t("keysTitle"))}</h3><div class="mbody" id="kBody"><div class="muted">${esc(t("keysLoading"))}</div></div>
+    <div class="mbtns"><span class="muted" id="kMsg">${esc(msg||"")}</span><span class="spacer"></span><button class="btn small" id="kClose">${esc(t("close"))}</button></div>`);
+  $("#kClose").onclick = closeModal;
+  let st; try{ st = await api("/api/keys?gateway="+encodeURIComponent(S.gateway)); }catch(e){ $("#kBody").textContent = e.message; return; }
+  renderKeys(st, msg);
+}
+function renderKeys(st, msg){
+  const body = $("#kBody"); if(!body) return;
+  if(!st.ok && st.need_credentials){
+    body.innerHTML = `<div>${esc(t("keysNeedCred"))}</div><input id="kEmail" dir="ltr" placeholder="${esc(t("keysEmail"))}"><input id="kPass" type="password" dir="ltr" placeholder="${esc(t("keysPass"))}">
+      <div class="mbtns"><button class="btn primary" id="kCred">${esc(t("keysSave"))}</button><span class="muted">${esc(st.error||"")}</span></div>`;
+    $("#kCred").onclick = async ()=>{ try{ renderKeys(await api("/api/keys",{method:"POST",body:{action:"credentials", gateway:S.gateway, email:$("#kEmail").value, password:$("#kPass").value}})); }catch(e){ banner(e.message,true); } };
+    return;
+  }
+  if(!st.ok){ body.innerHTML = `<div class="err">${esc(st.error||"")}</div>`; return; }
+  const kl = st.keyless_available||[];
+  body.innerHTML = `<div class="kstat">${esc(fmt(t("keysUsable"),{n:st.usable_tool_models}))}</div>
+    ${kl.length ? `<button class="btn primary" id="kKeyless">${esc(fmt(t("keysKeyless"),{n:kl.length}))}</button><div class="muted">${esc(kl.join("، "))}</div>` : `<div class="muted">${esc(t("keysKeylessNone"))}</div>`}
+    <div class="muted" style="margin:8px 0">${esc(t("keysHelp"))}</div>
+    ${(st.providers||[]).filter(p=>!p.keyless).map((p,i)=>`<div class="krow ${p.configured?"done":""}"><div class="kn"><b>${esc(p.name)}</b><small>${esc(fmt(t("keysTools"),{n:p.tool_models}))}</small></div>
+      ${p.url?`<a class="btn small" href="${esc(p.url)}" target="_blank" rel="noopener">${esc(t("keysOpen"))}</a>`:"<span></span>"}
+      <span class="muted">${p.configured?esc(fmt(t("keysHave"),{k:p.keys})):""}</span>
+      <div class="kadd"><input type="password" dir="ltr" data-kin="${esc(p.platform)}" placeholder="${esc(t("keysPaste"))}"><button class="btn small" data-kadd="${esc(p.platform)}">${esc(t("keysAdd"))}</button></div></div>`).join("")}`;
+  if($("#kMsg") && msg) $("#kMsg").textContent = msg;
+  const kb = $("#kKeyless"); if(kb) kb.onclick = async ()=>{ kb.disabled = true; try{ renderKeys(await api("/api/keys",{method:"POST",body:{action:"keyless", gateway:S.gateway}})); }catch(e){ banner(e.message,true); kb.disabled=false; } };
+  body.querySelectorAll("[data-kadd]").forEach(b=>b.onclick = async ()=>{
+    const plat = b.dataset.kadd; const inp = body.querySelector(`[data-kin="${plat}"]`); const key = (inp.value||"").trim(); if(!key) return;
+    b.disabled = true;
+    try{ const r = await api("/api/keys",{method:"POST",body:{action:"add", gateway:S.gateway, platform:plat, key}}); renderKeys(r, fmt(t("keysAdded"),{n:r.usable_tool_models})); }
+    catch(e){ banner(e.message,true); b.disabled = false; }
+  });
+}
 function renderProjChip(){
   const c = $("#projChip");
   if(!S.projectId){ c.classList.remove("show"); c.innerHTML = ""; return; }
@@ -779,17 +863,20 @@ $("#overlay").onclick = e=>{ if(e.target.id==="overlay") closeModal(); };
 document.addEventListener("keydown", e=>{ if(e.key==="Escape" && $("#overlay").classList.contains("show")) closeModal(); });
 
 /* ---------- error report ---------- */
-$("#reportBtn").onclick = async ()=>{
+$("#reportBtn").onclick = ()=>openReport(false);
+async function openReport(compact){
   if(!S.conv){ banner(t("reportNeedConv"), true); return; }
-  let r; try{ r = await api(`/api/conversations/${S.conv}/report`,{method:"POST"}); }catch(e){ banner(e.message,true); return; }
+  let r; try{ r = await api(`/api/conversations/${S.conv}/report`,{method:"POST", body:{compact}}); }catch(e){ banner(e.message,true); return; }
   const gwOpts = (S.state.gateways||[]).map(g=>`<option value="${esc(g.name)}" ${g.name===S.gateway?"selected":""}>${esc(g.title)}</option>`).join("");
   openModal(`<h3>🧾 ${esc(t("reportTitle"))}</h3><div class="mbody"><div class="muted" dir="auto">${esc(fmt(t("reportInfo"),{c:r.chars, p:r.path}))}</div>
+    <label class="muted"><input type="checkbox" id="rpShort" style="width:auto" ${compact?"checked":""}> ${esc(t("reportShort"))}</label>
     <textarea id="rpText" readonly dir="auto">${esc(r.text)}</textarea></div>
     <div class="mbtns"><button class="btn" id="rpDl">${esc(t("reportDl"))}</button><button class="btn" id="rpCopy">📋 ${esc(t("copy"))}</button>
       <span class="spacer"></span><span class="muted">${esc(t("reportSendTo"))}</span><select id="rpGw" style="width:auto">${gwOpts}</select>
       <button class="btn primary" id="rpSend">${esc(t("reportSend"))}</button></div>
     <div class="mbtns"><button class="btn small ghost" id="rpAnswer">${esc(t("reportOpenAnswer"))}</button><span class="spacer"></span><button class="btn small" id="rpClose">${esc(t("close"))}</button></div>`);
   $("#rpClose").onclick = closeModal;
+  $("#rpShort").onchange = e=>openReport(e.target.checked);
   $("#rpDl").onclick = ()=>{ const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([r.text],{type:"text/plain;charset=utf-8"})); a.download = r.name; a.click(); };
   $("#rpCopy").onclick = async ()=>{ try{ await navigator.clipboard.writeText(r.text); }catch(e){ $("#rpText").select(); document.execCommand("copy"); } $("#rpCopy").textContent = t("copied"); };
   $("#rpAnswer").onclick = ()=>{ closeModal(); openAnswer(); };
@@ -903,12 +990,12 @@ function assistantHTML(m, isLast){
   const all = SHOWALL() || meta.bridge_run;
   const body = parts.filter(p=>all || p.kind!=="tool").map(p=>p.kind==="tool"?toolHTML(p):(p.error?`<div class="err">${esc(brandText(p.text))}</div>`:md(brandText(p.text)))).join("");
   if(!all){  // only the answer
-    const intrQ = (isLast && meta.interrupted && !S.running) ? interruptHTML(meta) : "";
+    const intrQ = ((isLast && meta.interrupted && !S.running) ? interruptHTML(meta) : "") + ((isLast && !S.running) ? ctxWarnHTML(meta) : "");
     if(!body && !intrQ) return "";
     return `<div class="msg assistant" data-text="${esc(m.display)}"><div class="body">${body}${bridgeHTML(m)}</div>${metaHTML(meta)}${intrQ}</div>`;
   }
   const auto = (meta.approvals||[]).filter(a=>a.auto).map(a=>`<div class="notice">${esc(fmt(t("preAuto"),{t:a.tool}))}</div>`).join("");
-  const intr = (isLast && meta.interrupted && !S.running) ? interruptHTML(meta) : "";
+  const intr = ((isLast && meta.interrupted && !S.running) ? interruptHTML(meta) : "") + ((isLast && !S.running) ? ctxWarnHTML(meta) : "");
   const v = meta.verify; let ver = "";
   if(v){
     ver = (v.checks||[]).map(c=>`<div class="${c.code===0?"notice":"err"}" dir="auto">${esc(fmt(t("vRound"),{n:c.round, c:c.cmd}) + " — " + (c.code===0 ? t("vPass") : fmt(t("vFail"),{code:c.code})))}${c.code===0?"":`<details><summary>${esc(t("intrDetail"))}</summary><pre class="vout">${esc(c.output||"")}</pre></details>`}</div>`).join("");
@@ -995,7 +1082,8 @@ async function send(extra){
   S.running = run; if(!expert && !resume){ input.value=""; autosize(); } updateSend(); renderThread();
   const payload = {text, gateway:S.gateway, model:realModel($("#model").value.trim()), effort:$("#effort").value, permission_mode:$("#perm").value,
     deep, memory, attachments:atts, project:S.project, conversation_id:S.conv, resume,
-    project_id:S.projectId, preapprove:S.preapprove, verify:$("#verify").checked, visual:$("#visual").checked, account:S.account};
+    project_id:S.projectId, preapprove:S.preapprove, verify:$("#verify").checked, visual:$("#visual").checked, account:S.account,
+    failover:$("#failover").checked, handoff_from:(!S.conv && S.handoffFrom) ? S.handoffFrom.id : undefined};
   if(expert) payload.expert = expert;
   if(!resume){ S.attachments = []; renderChips(); }
   let finalMeta = null;
@@ -1017,7 +1105,7 @@ async function send(extra){
 }
 function handle(ev, run, userMsg){
   switch(ev.type){
-    case "conversation": S.conv = ev.id; renderProjChip(); loadConvs(); break;
+    case "conversation": S.conv = ev.id; S.handoffFrom = null; renderHoChip(); renderProjChip(); loadConvs(); break;
     case "start": run.runId = ev.run_id; if(!userMsg._started){ userMsg.sent = ev.sent; userMsg._started = true; } refreshState(); if($("#showSent").checked) renderThread(); break;
     case "notice": run.parts.push({kind:"notice", text:ev.text}); break;
     case "segment": run.parts.push({kind:"text", text:""}); break;
@@ -1032,7 +1120,9 @@ function handle(ev, run, userMsg){
       const textAll = (ev.meta.parts||[]).filter(p=>p.kind==="text"&&!p.error).map(p=>p.text).join("\n\n");
       S.messages.push({role:"assistant", display:textAll, meta:ev.meta}); run.parts = []; renderThread(); return; }
     case "auto_resume": run.parts.push({kind:"wait", until:ev.until, title:ev.title, attempt:ev.attempt, max:ev.max}); break;
-    case "resume_start": run.parts = []; S.messages.push({role:"user", display:ev.display, sent:ev.sent, meta:{resume:true, auto:true}}); renderThread(); return;
+    case "resume_start": run.parts = []; S.messages.push({role:"user", display:ev.display, sent:ev.sent, meta:{resume:true, auto:true}});
+      if(ev.gateway && gwInfo(ev.gateway)){ S.gateway = ev.gateway; LS.set("gateway", ev.gateway); renderPills(); loadModels(); }
+      renderThread(); return;
     case "verify": {
       if(!ev.check){ run.parts.push({kind:"notice", text:t("vSelf")}); break; }
       const c = ev.check;

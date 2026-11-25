@@ -16,6 +16,7 @@
 | `visual_review.txt` | ما يُطلب من النموذج الذي يرى الصور عند مراجعة اللقطات | `{request}` `{shots}` `{problems}` |
 | `visual_fix.txt` | ما يُعاد إلى النموذج إذا ظهرت مشاكل في التجربة الفعلية | `{command}` `{url}` `{count}` `{dir}` `{problems}` `{shots}` `{round}` `{max}` |
 | `bridge_request.txt` | طلب «🌐 Claude.ai يدوي»: كيف يكتب Claude ردّه + المشروع والملفات | `{project}` `{instructions}` `{handoff}` `{tree}` `{files}` `{checks}` `{request}` |
+| `run_rules.txt` | قواعد تُرسل مع كل تشغيل (الخوادم في الخلفية، مخرجات قصيرة) | — |
 | `expert_answer.txt` | عند «رفع إجابة» 📥 إلى المحادثة | `{answer}` الإجابة المرفوعة · `{note}` ملاحظتك |
 
 عدّل النص كما تريد، ويُطبَّق التعديل على الرسالة التالية مباشرة دون إعادة تشغيل.

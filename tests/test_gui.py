@@ -536,7 +536,10 @@ class GuiServerTests(unittest.TestCase):
         self.assertFalse(Path(f["path"]).exists())
 
         ev = self.chat(text="عادي", gateway="fake")              # chats outside a project get no project prompt
-        self.assertNotIn("--append-system-prompt-file", self.sb.read_record()["argv"])
+        argv = self.sb.read_record()["argv"]
+        general = Path(argv[argv.index("--append-system-prompt-file") + 1]).read_text(encoding="utf-8")
+        self.assertNotIn("تعليمات جديدة", general)
+        self.assertIn("قواعد التشغيل", general)                   # the always-on rules (background servers…)
         self.call(f"/api/projects/{pid}", method="DELETE")
         self.assertEqual(json.loads(self.call("/api/projects")[1])["projects"], [])
         self.assertIsNone(self.ctx.store().conversation(conv_id)["project_id"])  # the chat is kept
@@ -812,6 +815,234 @@ class GuiServerTests(unittest.TestCase):
             ev = self.chat(text="EDIT x", gateway="fake", visual=True)
         self.assertTrue(any("allinone install visual" in n["text"] for n in self.of(ev, "notice")))
         self.assertNotIn("allinone_browser", self.sb.read_record()["mcp"]["mcpServers"])
+
+    # ------------------------------------------------------------- speed: context, failover, hand-over
+    def test_context_limits_for_gateway_models(self):
+        self.chat(text="hi", gateway="fake")
+        env = self.sb.read_record()["env"]
+        self.assertEqual(env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], "128000")    # custom gateways
+        self.assertEqual(env["BASH_MAX_OUTPUT_LENGTH"], "12000")
+
+    def test_failover_to_next_gateway(self):
+        os.environ["FAKE_AUTH"] = "1"
+        self.addCleanup(lambda: os.environ.pop("FAKE_AUTH", None))
+        self.app.ctx.cfg.data.setdefault("gui", {})["failover"] = {"order": ["fake", "claude"]}
+        ev = self.chat(text="build it FAIL_429", gateway="fake", failover=True)
+        notes = " ".join(n["text"] for n in self.of(ev, "notice"))
+        self.assertIn("↪", notes)
+        start = self.of(ev, "resume_start")[0]
+        self.assertEqual(start["gateway"], "claude")
+        conv_id = self.of(ev, "conversation")[0]["id"]
+        moved = [m for m in self.ctx.store().messages(conv_id) if (m.get("meta") or {}).get("failover") == "claude"][0]
+        self.assertIn("ملف تسليم المهمة", moved["sent"])                # it carries the work so far
+        saved = self.of(ev, "saved")
+        self.assertEqual(saved[1]["meta"]["gateway"], "claude")
+        self.assertEqual(saved[-1]["meta"]["gateway"], "claude")
+        self.assertNotIn("interrupted", saved[-1]["meta"])
+        # without the switch it waits on the same gateway instead
+        self.app.ctx.cfg.data["gui"]["auto_resume"] = {"enabled": False}
+        ev = self.chat(text="again FAIL_429", gateway="fake")
+        self.assertEqual(self.of(ev, "resume_start"), [])
+
+    def test_new_chat_continues_from_long_one(self):
+        old = self.of(self.chat(text="the original long task USE_TOOL", gateway="fake"), "conversation")[0]["id"]
+        ev = self.chat(text="carry on", gateway="fake", handoff_from=old)
+        new = self.of(ev, "conversation")[0]["id"]
+        self.assertNotEqual(new, old)
+        rec = self.sb.read_record()
+        self.assertIn("ملف تسليم المهمة", rec["prompt"])
+        self.assertIn("the original long task", rec["prompt"])
+        self.assertTrue(rec["prompt"].rstrip().endswith("carry on"))
+        self.assertGreater(self.of(ev, "saved")[0]["meta"]["context_tokens"], 0)
+
+    def test_fast_model_picks_and_rests_models(self):
+        class FakeAdmin:
+            calls = []
+            def tool_models(self, min_context=0, exclude=None):
+                FakeAdmin.calls.append(set(exclude or ()))
+                return [m for m in ({"modelId": "llama-fast", "platform": "groq", "contextWindow": 131072},
+                                    {"modelId": "gemini-flash", "platform": "google", "contextWindow": 1000000})
+                        if m["modelId"] not in (exclude or ())]
+        from unittest import mock
+        gw = mock.Mock(type_name="freellmapi")
+        with mock.patch.object(gui.GuiApp, "keys_admin", return_value=FakeAdmin()):
+            ev = []
+            self.assertEqual(self.app.pick_fast_model(gw, ev.append), ("llama-fast", 131072))
+            self.app.model_cooldown["llama-fast"] = time.time() + 300
+            self.assertEqual(self.app.pick_fast_model(gw, ev.append), ("gemini-flash", 1000000))
+        self.assertIn("llama-fast", FakeAdmin.calls[-1])
+        env = self.app.context_env(mock.Mock(type_name="freellmapi", name="freellmapi"), 131072)
+        self.assertEqual(env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], "64000")       # the smaller of config and model
+
+    def test_short_report_and_gateway_diagnosis(self):
+        self.app.ctx.cfg.data.setdefault("gui", {})["auto_resume"] = {"enabled": False}
+        ev = self.chat(text="please USE_TOOL now", gateway="fake")
+        conv_id = self.of(ev, "conversation")[0]["id"]
+        self.chat(text="FAIL_429", gateway="fake", conversation_id=conv_id)
+        full = json.loads(self.call(f"/api/conversations/{conv_id}/report", {})[1])["text"]
+        short = json.loads(self.call(f"/api/conversations/{conv_id}/report", {"compact": True})[1])
+        self.assertIn("-short", short["name"])
+        self.assertIn("المدخلات:", full)
+        self.assertNotIn("المدخلات:", short["text"])                      # successful steps are one line
+        self.assertIn("[الخطوة 1] ✔ Write: hello.txt", short["text"])
+        lines = gui.gateway_diagnosis([{"role": "assistant", "meta": {"parts": [
+            {"kind": "text", "text": "API Error: Request rejected (429) · All models exhausted: 48 routes checked "
+             "(6 rate-limited or on cooldown, 6 prompt too large for the model, 36 model lacks tool-calling). "
+             "Soonest reset ~5m. 380 models skipped: no key configured for their platform."},
+            {"kind": "tool", "name": "Bash", "input": {"command": "python -m http.server 8000"},
+             "result": "Command did not complete within its 120s timeout and was moved to the background"}]}}])
+        text = "\n".join(lines)
+        for needle in ("48 مساراً", "لا تدعم الأدوات", "380 نموذجاً", "5m", "python -m http.server 8000", "app_start"):
+            self.assertIn(needle, text)
+
+    def test_app_tools_start_once_in_background(self):
+        import subprocess as sp
+        import sys as _sys
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "index.html").write_text("<h1>ok</h1>")
+            cmd = f'"{_sys.executable}" -m http.server 0 --bind 127.0.0.1'
+            calls = [("app_start", {"command": cmd, "cwd": tmp, "wait_seconds": 20}),
+                     ("app_start", {"command": cmd, "cwd": tmp, "wait_seconds": 20}),
+                     ("app_logs", {}), ("app_stop", {})]
+            msgs = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18",
+                     "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}}},
+                    {"jsonrpc": "2.0", "method": "notifications/initialized"}]
+            msgs += [{"jsonrpc": "2.0", "id": i, "method": "tools/call", "params": {"name": n, "arguments": a}}
+                     for i, (n, a) in enumerate(calls, 2)]
+            out = sp.run([_sys.executable, str(ROOT / "claude" / "mcp" / "allinone_tools.py")],
+                         input="".join(json.dumps(m) + "\n" for m in msgs).encode(), capture_output=True,
+                         env=dict(os.environ, ALLINONE_DATA_DIR=str(Path(tmp) / "d")), timeout=90).stdout.decode()
+            replies = {r["id"]: r["result"]["content"][0]["text"] for r in map(json.loads, out.splitlines())
+                       if (r.get("id") or 0) > 1}
+            self.assertIn("http://", replies[2])                         # started and found its URL
+            self.assertIn("يعمل مسبقاً", replies[3])                      # not started twice
+            self.assertIn("أُوقف", replies[5])
+
+    def test_wait_follows_the_gateway_reset_time(self):
+        d = gui.diagnose("freellmapi", "API Error: Request rejected (429) · All models exhausted … Soonest reset ~5m.")
+        self.assertEqual((d["reason"], d["wait"]), ("rate_limit", 305))
+        self.assertEqual(gui.diagnose("freellmapi", "429 All models rate-limited. Soonest cooldown reset ~17s")["wait"], 22)
+        self.assertEqual(gui.diagnose("omniroute", "429 Too Many Requests")["wait"], 60)   # nothing said: default
+
+
+class FreeLLMAPIAdminTests(unittest.TestCase):
+    """The keys page talks to FreeLLMAPI's dashboard API; a small stand-in answers here."""
+
+    def setUp(self):
+        import http.server
+        import tempfile
+        import threading
+        state = self.state = {"users": 0, "keys": [], "keyless_enabled": False, "logins": 0}
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _send(self, code, obj):
+                data = json.dumps(obj).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def _authed(self):
+                return self.headers.get("Authorization") == "Bearer tok"
+
+            def do_GET(self):
+                if self.path == "/api/auth/status":
+                    return self._send(200, {"needsSetup": state["users"] == 0})
+                if not self._authed():
+                    return self._send(401, {"error": {"message": "Authentication required"}})
+                if self.path == "/api/keys/providers":
+                    have = {k["platform"] for k in state["keys"]}
+                    return self._send(200, {"providers": [
+                        {"platform": "groq", "name": "Groq", "kind": "chat", "keyless": False,
+                         "configured": "groq" in have, "enabledKeyCount": int("groq" in have)},
+                        {"platform": "google", "name": "Google", "kind": "chat", "keyless": False,
+                         "configured": False, "enabledKeyCount": 0},
+                        {"platform": "kilo", "name": "Kilo", "kind": "chat", "keyless": True,
+                         "configured": state["keyless_enabled"], "enabledKeyCount": int(state["keyless_enabled"])},
+                        {"platform": "brave", "name": "Brave", "kind": "search", "keyless": False,
+                         "configured": False, "enabledKeyCount": 0}]})
+                if self.path == "/api/models":
+                    return self._send(200, [
+                        {"platform": "groq", "modelId": "llama-70b", "supportsTools": True, "enabled": True, "speedRank": 2, "contextWindow": 131072},
+                        {"platform": "groq", "modelId": "llama-8b", "supportsTools": True, "enabled": True, "speedRank": 1, "contextWindow": 8192},
+                        {"platform": "google", "modelId": "gemini", "supportsTools": True, "enabled": True, "speedRank": 1, "contextWindow": 1000000},
+                        {"platform": "google", "modelId": "gemma", "supportsTools": False, "enabled": True, "speedRank": 1, "contextWindow": 8192},
+                        {"platform": "kilo", "modelId": "kilo-auto", "supportsTools": True, "enabled": True, "speedRank": 5, "contextWindow": 64000}])
+                if self.path == "/api/keys/keyless-available":
+                    return self._send(200, {"providers": [] if state["keyless_enabled"] else [{"platform": "kilo", "name": "Kilo"}]})
+                self._send(404, {})
+
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+                if self.path == "/api/auth/setup":
+                    state["users"] = 1
+                    state["creds"] = (body["email"], body["password"])
+                    return self._send(201, {"token": "tok"})
+                if self.path == "/api/auth/login":
+                    state["logins"] += 1
+                    ok = state.get("creds") == (body.get("email"), body.get("password"))
+                    return self._send(200, {"token": "tok"}) if ok else self._send(401, {"error": {"message": "Invalid"}})
+                if not self._authed():
+                    return self._send(401, {})
+                if self.path == "/api/keys":
+                    state["keys"].append(body)
+                    return self._send(200, {"modelsAvailable": 2, "status": "unknown"})
+                if self.path == "/api/keys/keyless-available/enable":
+                    state["keyless_enabled"] = True
+                    return self._send(200, {"enabled": ["kilo"]})
+                self._send(404, {})
+
+        self.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        self.tmp = tempfile.TemporaryDirectory()
+        from controller.config import Secrets
+        from controller.freellmapi_admin import FreeLLMAPIAdmin
+        FreeLLMAPIAdmin._token_cache.clear()
+        self.ctx = type("C", (), {"secrets": Secrets(Path(self.tmp.name) / "secrets.json")})()
+        self.gw = type("G", (), {"name": "freellmapi", "base_url": f"http://127.0.0.1:{self.srv.server_address[1]}",
+                                 "install_dir": self.tmp.name})()
+        self.Admin = FreeLLMAPIAdmin
+
+    def tearDown(self):
+        self.srv.shutdown()
+        self.tmp.cleanup()
+
+    def test_keys_page_flow(self):
+        admin = self.Admin(self.ctx, self.gw)
+        st = admin.status()                                          # a fresh dashboard is claimed for Allinone
+        self.assertEqual(self.ctx.secrets.get("freellmapi", "dashboard_email"), "allinone@localhost.local")
+        self.assertEqual(st["usable_tool_models"], 0)
+        self.assertEqual(st["keyless_available"], ["Kilo"])
+        names = [p["platform"] for p in st["providers"]]
+        self.assertNotIn("brave", names)                             # search keys are not for chat
+        self.assertEqual(names[:2], ["groq", "google"])              # most tool-capable models first
+        self.assertEqual(st["providers"][0]["tool_models"], 2)
+        self.assertTrue(st["providers"][0]["url"].startswith("https://console.groq.com"))
+        admin.add_key("groq", "  gsk_abc  ")
+        self.assertEqual(self.state["keys"], [{"platform": "groq", "key": "gsk_abc"}])
+        admin.enable_keyless()
+        st = admin.status()
+        self.assertEqual(st["usable_tool_models"], 3)                # groq ×2 + kilo
+        fast = admin.tool_models(min_context=32000)
+        self.assertEqual([m["modelId"] for m in fast], ["llama-70b", "kilo-auto"])   # 8k context excluded
+        # a new Allinone process signs in with the saved password
+        self.Admin._token_cache.clear()
+        self.Admin(self.ctx, self.gw).status()
+        self.assertEqual(self.state["logins"], 1)
+
+    def test_existing_dashboard_needs_password_once(self):
+        from controller.freellmapi_admin import NeedCredentials
+        self.state["users"] = 1
+        self.state["creds"] = ("me@x.com", "secret123")
+        with self.assertRaises(NeedCredentials):
+            self.Admin(self.ctx, self.gw).status()
+        self.Admin(self.ctx, self.gw).save_credentials("me@x.com", "secret123")
+        self.assertIn("providers", self.Admin(self.ctx, self.gw).status())
 
 
 class VerifyHookTests(unittest.TestCase):

@@ -11,6 +11,9 @@ Built in:
   memory_forget    delete a note
   task_list        recent tasks run by the Allinone controller
   task_show        one task's prompt and result
+  app_start        start the program (a server or app that keeps running) in the background, get its URL
+  app_logs         the latest output of a program started with app_start
+  app_stop         stop it (programs started here also stop when the session ends)
 
 Your own tools: drop a .py file into claude/mcp/tools/ (see tools/README.md).
 """
@@ -167,6 +170,86 @@ def task_show(id: int) -> str:
 
 
 # --------------------------------------------------------------- user tools
+# ------------------------------------------------------------------ programs that keep running
+# A server started in the foreground never finishes: the Bash tool then waits for its whole timeout
+# (2 minutes) and the model often starts it again. These tools start it once, in the background,
+# wait until it answers and return its URL.
+sys.path.insert(0, str(ROOT / "claude" / "visual"))
+_apps: dict = {}
+
+
+def _stop_all() -> None:
+    for app in list(_apps.values()):
+        try:
+            app.stop()
+        except Exception:
+            pass
+
+
+import atexit  # noqa: E402
+
+atexit.register(_stop_all)
+
+
+@tool
+def app_start(command: str = "", cwd: str = "", url: str = "", wait_seconds: int = 60) -> str:
+    """Start the program (dev server, web app, API, desktop app) in the BACKGROUND and wait until it answers.
+    Use this instead of running a server with Bash. Empty `command` = detect (npm run dev/start, Django,
+    Flask/FastAPI/Streamlit, or a static index.html). Returns the URL and the first output lines.
+    If the same command is already running it is reused, not started twice."""
+    import browser_lib as bl  # stdlib only for starting programs
+    folder = Path(cwd or os.getcwd())
+    kind = "web"
+    if not command:
+        found = bl.detect_app(folder, sys.executable)
+        if not found:
+            return "لم أعرف كيف يُشغَّل هذا المشروع؛ مرّر command صراحة (مثل: npm run dev)."
+        command, url, kind = found["command"], url or found["url"], found["kind"]
+    key = f"{folder}::{command}"
+    app = _apps.get(key)
+    if app is not None and app.alive():
+        return f"يعمل مسبقاً (لم يُشغَّل مرة ثانية). الرابط: {getattr(app, 'url', '') or url or '؟'}\n{app.tail(15)}"
+    app = bl.App(command, folder)
+    _apps[key] = app
+    deadline = time.time() + max(5, min(int(wait_seconds or 60), 300))
+    while time.time() < deadline:
+        if not app.alive():
+            return f"توقف البرنامج فور تشغيله (رمز الخروج {app.proc.returncode}). مخرجاته:\n{app.tail(30)}"
+        if kind == "desktop" and time.time() > deadline - max(5, int(wait_seconds or 60)) + 5:
+            return f"بدأ برنامج سطح المكتب ({command}) ويعمل في الخلفية.\n{app.tail(15)}"
+        found_url = url or app.url_in_output() or ""
+        if found_url and bl.url_ready(found_url):
+            app.url = found_url
+            return f"يعمل في الخلفية: {found_url}\nالأمر: {command}\n{app.tail(15)}"
+        time.sleep(0.5)
+    return (f"بدأ في الخلفية لكنه لم يصبح جاهزاً خلال {wait_seconds} ثانية"
+            f"{(' على ' + url) if url else ' (لم يظهر رابط في مخرجاته)'}. آخر مخرجاته:\n{app.tail(25)}")
+
+
+@tool
+def app_logs(lines: int = 40) -> str:
+    """The latest output of the programs started with app_start (errors show up here)."""
+    if not _apps:
+        return "لا توجد برامج شُغّلت بـ app_start."
+    out = []
+    for key, app in _apps.items():
+        state = "يعمل" if app.alive() else f"متوقف (رمز {app.proc.returncode})"
+        out.append(f"== {key.split('::', 1)[1]} — {state} ==\n{app.tail(int(lines or 40))}")
+    return "\n\n".join(out)
+
+
+@tool
+def app_stop(command: str = "") -> str:
+    """Stop the program(s) started with app_start (all of them when `command` is empty)."""
+    stopped = []
+    for key, app in list(_apps.items()):
+        if not command or key.endswith("::" + command):
+            app.stop()
+            stopped.append(key.split("::", 1)[1])
+            _apps.pop(key, None)
+    return ("أُوقف: " + "، ".join(stopped)) if stopped else "لا يوجد ما يُوقف."
+
+
 def load_user_tools() -> None:
     folder = HERE / "tools"
     if not folder.is_dir():

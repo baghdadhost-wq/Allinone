@@ -169,7 +169,8 @@ def stream(prompt, argv):
         time.sleep(180)
     reasons = run_stop_hooks(argv, sid, prompt)
     text = ask_gateway(prompt[-200:])
-    emit({"type": "stream_event", "event": {"type": "message_start", "message": {"id": "m1"}}})
+    emit({"type": "stream_event", "event": {"type": "message_start", "message": {
+        "id": "m1", "usage": {"input_tokens": 50, "cache_read_input_tokens": len(prompt) // 4}}}})
     emit({"type": "stream_event", "event": {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}})
     for i in range(0, len(text), 7):
         emit({"type": "stream_event", "event": {"type": "content_block_delta", "index": 0,
@@ -197,7 +198,7 @@ def main():
         return 0
     record = {"argv": argv, "cwd": os.getcwd(),
               "env": {k: v for k, v in os.environ.items()
-                      if k.startswith(("ANTHROPIC_", "CLAUDE_", "ALLINONE_", "DISABLE_"))}}
+                      if k.startswith(("ANTHROPIC_", "CLAUDE_", "ALLINONE_", "DISABLE_", "BASH_"))}}
     settings_path = arg_values(argv, "--settings")[0]
     mcp_path = arg_values(argv, "--mcp-config")[0]
     with open(settings_path, encoding="utf-8") as fh:

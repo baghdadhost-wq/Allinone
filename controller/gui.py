@@ -247,6 +247,11 @@ def analyze_timing(meta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         groups[grp] += cats[key]
     pct = {g: (v / total * 100 if total else 0.0) for g, v in groups.items()}
     gtype = meta.get("gateway_type") or ""
+    speed = (gen_chars / gen_time) if gen_time else None
+    buffered = bool(speed and speed > 2000)
+    if buffered:
+        flags.append({"t": 0.0, "text": "البوابة لا ترسل الرد تدريجياً بل دفعة واحدة؛ لذلك «انتظار النموذج» هنا "
+                                        "يشمل وقت كتابة النموذج للرد، ولا يمكن فصلهما."})
     if total < 5:
         verdict = "رد سريع؛ لا يوجد تأخير يُذكر."
     elif pct["wait"] >= 50:
@@ -260,8 +265,10 @@ def analyze_timing(meta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         verdict = f"جزء كبير من الوقت ({pct['user']:.0f}%) انتظار إذنك؛ فعّل 🔓 الإذن المسبق لتجنبه."
     else:
         verdict = f"مختلط: عمل {pct['work']:.0f}% · انتظار البوابة/النموذج {pct['wait']:.0f}% · انتظار إذنك {pct['user']:.0f}%."
+    if buffered and pct["wait"] >= 50:
+        verdict += " (الانتظار هنا يشمل كتابة النموذج لأن البوابة ترسل الرد دفعة واحدة.)"
     return {"cats": cats, "total": total, "groups": groups, "pct": pct, "flags": flags, "waits": waits,
-            "tools": tools, "verdict": verdict, "speed": (gen_chars / gen_time) if gen_time else None,
+            "tools": tools, "verdict": verdict, "speed": None if buffered else speed, "buffered": buffered,
             "t0": t0, "timeline": tl}
 
 
@@ -272,8 +279,51 @@ def _text_end(tl: List[Dict[str, Any]], t: float) -> Optional[float]:
     return None
 
 
+def gateway_diagnosis(messages: List[Dict[str, Any]]) -> List[str]:
+    """What the gateway itself said went wrong, counted and explained (429s, missing keys, endless commands)."""
+    texts: List[str] = []
+    fg: List[str] = []
+    for m in messages:
+        for p in (m.get("meta") or {}).get("parts") or []:
+            if p.get("kind") == "text":
+                texts.append(p.get("text") or "")
+            elif p.get("kind") == "tool":
+                res = str(p.get("result") or "")
+                texts.append(res)
+                if re.search(r"did not complete within its \d+s timeout|timed out after \d+", res):
+                    inp = p.get("input") if isinstance(p.get("input"), dict) else {}
+                    fg.append(str(inp.get("command") or p.get("name")))
+    blob = "\n".join(texts)
+    out: List[str] = []
+    exhausted = re.findall(r"All models (?:exhausted|rate-limited)", blob)
+    if exhausted:
+        out.append(f"- البوابة رفضت الطلب لأن كل نماذجها مشغولة أو غير صالحة {len(exhausted)} مرة (429).")
+    m = None
+    for m in re.finditer(r"(\d+) routes checked \(([^)]*)\)", blob):
+        pass
+    if m:
+        out.append(f"- آخر فحص للمسارات: {m.group(1)} مساراً — {m.group(2)}.")
+        if "lacks tool-calling" in m.group(2):
+            out.append("  ← كثير من النماذج لا تدعم الأدوات التي يحتاجها smarter Code؛ أضف مزوّدين نماذجهم تدعمها (زر 🔑 المفاتيح).")
+        if "prompt too large" in m.group(2):
+            out.append("  ← الطلب أكبر من سياق بعض النماذج: ابدأ محادثة جديدة بملف تسليم، أو اختر نموذجاً بسياق أكبر.")
+        if "rate-limited" in m.group(2) or "cooldown" in m.group(2):
+            out.append("  ← نماذج وصلت حدودها: أضف مفاتيح أكثر، أو فعّل «↪ تحويل تلقائي» إلى بوابة أخرى.")
+    skipped = re.findall(r"(\d+) models skipped: no key", blob)
+    if skipped:
+        out.append(f"- {skipped[-1]} نموذجاً متخطى لأنه لا يوجد مفتاح لمزوّده.")
+    resets = re.findall(r"reset ~\s*(\d+\s*[smh])", blob)
+    if resets:
+        out.append(f"- البوابة ذكرت أوقات تجدد الحد: {', '.join(dict.fromkeys(resets))}.")
+    if fg:
+        out.append(f"- أمر لا ينتهي شُغّل في المقدمة {len(fg)} مرة (كل مرة تنتظر المهلة كاملة): "
+                   + "، ".join(dict.fromkeys(_clip(c, 80) for c in fg)))
+        out.append("  ← الخوادم تُشغّل في الخلفية مرة واحدة (أداة app_start).")
+    return out
+
+
 def build_report_text(conv: Dict[str, Any], messages: List[Dict[str, Any]], header: str,
-                      project: Optional[Dict[str, Any]] = None) -> str:
+                      project: Optional[Dict[str, Any]] = None, compact: bool = False) -> str:
     """A plain-text report of what was asked, every step Claude Code took, and every error."""
     out = [header.strip(), "", "=" * 70, "معلومات المحادثة", "=" * 70,
            f"العنوان: {conv.get('title') or ''}",
@@ -320,10 +370,21 @@ def build_report_text(conv: Dict[str, Any], messages: List[Dict[str, Any]], head
         elif m.get("created"):
             out.append(f"⏱ حُفظ: {_clock(m['created'])} (لا تتوفر تفاصيل توقيت لهذا الرد؛ سُجّل بإصدار أقدم)")
         step = 0
-        for p in meta.get("parts") or [{"kind": "text", "text": m.get("display") or ""}]:
+        parts_ = meta.get("parts") or [{"kind": "text", "text": m.get("display") or ""}]
+        tools_ = [q for q in parts_ if q.get("kind") == "tool"]
+        keep = set()
+        for i, q in enumerate(tools_):  # short report: failed steps and the step just before each
+            if _part_is_error(q):
+                keep.update({id(q), id(tools_[i - 1]) if i else id(q)})
+        for p in parts_:
             if p.get("kind") == "tool":
                 step += 1
                 bad = _part_is_error(p)
+                if compact and id(p) not in keep:
+                    inp = p.get("input") if isinstance(p.get("input"), dict) else {}
+                    brief = inp.get("command") or inp.get("file_path") or inp.get("url") or inp.get("pattern") or ""
+                    out.append(f"[الخطوة {step}] ✔ {p.get('name')}: {_clip(str(brief), 100)}")
+                    continue
                 out.append(f"[الخطوة {step}] {'✘ فشلت' if bad else '✔'} الأداة: {p.get('name')}")
                 if tm and p.get("t_call") is not None:
                     info = tm["tools"].get(p.get("id")) or {}
@@ -353,7 +414,7 @@ def build_report_text(conv: Dict[str, Any], messages: List[Dict[str, Any]], head
                     if tm and p.get("t") is not None:
                         end = _text_end(tm["timeline"], p["t"])
                         head += f" ⏱ صدر: {abs_(p['t'])}" + (f" · اكتمل: {abs_(end)}" if end is not None else "")
-                    out += [head, _clip(p["text"], 4000)]
+                    out += [head, _clip(p["text"], 800 if compact else 4000)]
         for a in meta.get("approvals") or []:
             state = {"allow": "سُمح", "deny": "رُفض"}.get(a.get("behavior"), a.get("behavior"))
             when = ""
@@ -417,6 +478,9 @@ def build_report_text(conv: Dict[str, Any], messages: List[Dict[str, Any]], head
                 "أُوقف يدوياً" if meta.get("stopped") else ""]
         if any(bits):
             out.append("(" + " · ".join(b for b in bits if b) + ")")
+    diag_lines = gateway_diagnosis(messages)
+    if diag_lines:
+        out += ["", "=" * 70, "تشخيص البوابة (من رسائلها نفسها)", "=" * 70] + diag_lines
     if summary:
         out += ["", "=" * 70, "ملخص التوقيت", "=" * 70] + summary
         slow = sorted(all_waits, key=lambda w: -w["wait"])[:5]
@@ -490,6 +554,7 @@ HANDOFF_TEMPLATE = """هذه مهمة بدأت في جلسة سابقة (ربم�
 {message}"""
 
 RESUME_LABEL = "▶ متابعة"
+FAST_MODEL = "allinone:fast"  # ⚡ the fastest usable tool-capable model (FreeLLMAPI)
 AUTO_RESUME_LABEL = "↻ متابعة تلقائية ({n}/{m})"
 
 # reason -> (title, retry automatically, wait seconds, how to resume, attempts)
@@ -545,6 +610,18 @@ def _parse_reset(text: str, now: Optional[float] = None) -> Optional[float]:
     return None
 
 
+def _reset_seconds(text: str) -> Optional[float]:
+    """'Soonest reset ~5m', 'cooldown reset ~17s', 'retry after 30 seconds', 'try again in 2 minutes'."""
+    best = None
+    for m in re.finditer(r"(?:reset|retry[- ]after|try again in|available in|wait)\D{0,12}?~?\s*(\d+(?:\.\d+)?)\s*"
+                         r"(ms|milliseconds?|s|secs?|seconds?|m|mins?|minutes?|h|hrs?|hours?)\b", text or "", re.I):
+        n, unit = float(m.group(1)), m.group(2).lower()
+        sec = n / 1000 if unit.startswith("ms") or unit.startswith("milli") else n * 60 if unit.startswith("m") \
+            else n * 3600 if unit.startswith("h") else n
+        best = sec if best is None else min(best, sec)
+    return best
+
+
 def diagnose(gw_type: str, text: str, gw_up: bool = True, stopped: bool = False, subtype: str = "",
              closed: bool = False, now: Optional[float] = None) -> Dict[str, Any]:
     """Why did a run stop, and how should it be resumed? Different gateways fail differently."""
@@ -575,6 +652,10 @@ def diagnose(gw_type: str, text: str, gw_up: bool = True, stopped: bool = False,
     else:
         reason = "crash"
     title, retry, wait, mode, attempts = _REASONS[reason]
+    if reason == "rate_limit":
+        told = _reset_seconds(text)
+        if told is not None:  # the gateway said when: wait exactly that, not a guess
+            wait = int(min(told, 6 * 3600)) + 5
     gtype = gw_type if gw_type in ("omniroute", "freellmapi", "anthropic") else ""
     advice = _ADVICE.get((reason, gtype)) or _ADVICE.get((reason, "")) or ""
     resume_at = None
@@ -671,6 +752,14 @@ class StreamTranslator:
         self.started = time.time() if started is None else started
         self.timeline: List[Dict[str, Any]] = []
         self._msg: Optional[Dict[str, Any]] = None  # the model message being streamed
+        self.context_tokens = 0  # size of the latest request sent to the model (the conversation so far)
+
+    def _usage(self, usage: Any) -> None:
+        if isinstance(usage, dict):
+            total = sum(int(usage.get(k) or 0) for k in ("input_tokens", "cache_read_input_tokens",
+                                                         "cache_creation_input_tokens"))
+            if total:
+                self.context_tokens = total
 
     def now(self) -> float:
         return round(time.time() - self.started, 2)
@@ -719,6 +808,7 @@ class StreamTranslator:
             e = evt.get("event") or {}
             et = e.get("type")
             if et == "message_start":
+                self._usage((e.get("message") or {}).get("usage"))
                 self.deltas_in_message = False
                 self._end_message()
                 t = self.mark("model_start")
@@ -743,6 +833,7 @@ class StreamTranslator:
         elif t == "assistant":
             if evt.get("parent_tool_use_id"):
                 return out
+            self._usage((evt.get("message") or {}).get("usage"))
             for block in (evt.get("message") or {}).get("content") or []:
                 bt = block.get("type")
                 if bt == "text" and not self.deltas_in_message and block.get("text"):
@@ -822,6 +913,7 @@ class GuiApp:
         self.preapproved: set = set()
         self.run_approvals: Dict[str, List[Dict[str, Any]]] = {}
         self.live: Dict[int, Dict[str, Any]] = {}
+        self.model_cooldown: Dict[str, float] = {}
         self.resume_cancel: Dict[int, threading.Event] = {}
         self.approval_timeout = 1800.0
         self.httpd = None
@@ -870,6 +962,8 @@ class GuiApp:
             "max_upload_mb": self.max_upload() // (1024 * 1024),
             "report_ask": read_prompt(self.ctx, "report_request.txt", REPORT_ASK),
             "visual": self.visual_status(),
+            "fast_model": FAST_MODEL,
+            "context": {"warn_ratio": self.context_cfg()["warn_ratio"]},
         }
 
     def max_upload(self) -> int:
@@ -917,6 +1011,109 @@ class GuiApp:
         if "{answer}" not in tpl:
             tpl += "\n\n{answer}"
         return tpl.replace("{note}", note_line).replace("{answer}", answer).strip()
+
+    # ------------------------------------------------------------- speed & size
+    def context_cfg(self) -> Dict[str, Any]:
+        cfg = (self.ctx.cfg.get("gui") or {}).get("context") or {}
+        limits = {"freellmapi": 64000, "omniroute": 128000, "custom": 128000}
+        limits.update(cfg.get("max_tokens") or {})
+        return {"max_tokens": limits, "bash_output": int(cfg.get("bash_output", 12000)),
+                "warn_ratio": float(cfg.get("warn_ratio", 0.6)), "fast_min_context": int(cfg.get("fast_min_context", 32000))}
+
+    def context_env(self, gw, ctx_window: int = 0) -> Dict[str, str]:
+        """Tell Claude Code the real size of the gateway's models so it compacts the conversation in time,
+        and keep command output short. Claude itself needs neither."""
+        if gw.type_name == "anthropic":
+            return {}
+        cfg = self.context_cfg()
+        limit = int(cfg["max_tokens"].get(gw.name) or cfg["max_tokens"].get(gw.type_name) or 0)
+        if ctx_window:
+            limit = min(limit, ctx_window) if limit else ctx_window
+        env = {"BASH_MAX_OUTPUT_LENGTH": str(cfg["bash_output"])} if cfg["bash_output"] else {}
+        if limit:
+            env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(limit)
+        return env
+
+    def keys_admin(self, gw):
+        from .freellmapi_admin import FreeLLMAPIAdmin
+        return FreeLLMAPIAdmin(self.ctx, gw)
+
+    def pick_fast_model(self, gw, emit) -> tuple:
+        """⚡ The fastest usable model that can call tools (FreeLLMAPI), skipping ones resting after a 429."""
+        if gw.type_name != "freellmapi":
+            return None, 0
+        now = time.time()
+        with self.lock:
+            resting = {m for m, until in self.model_cooldown.items() if until > now}
+        try:
+            cands = self.keys_admin(gw).tool_models(self.context_cfg()["fast_min_context"], resting)
+        except Exception as exc:
+            emit({"type": "notice", "text": tr("⚡ Could not read FreeLLMAPI's models ({e}); using auto.",
+                                               "⚡ تعذّرت قراءة نماذج FreeLLMAPI ({e})؛ سيُستخدم auto.", e=exc)})
+            return None, 0
+        if not cands:
+            emit({"type": "notice", "text": tr("⚡ No usable tool-capable model right now; using auto. Add keys (🔑).",
+                                               "⚡ لا يوجد الآن نموذج صالح يدعم الأدوات؛ سيُستخدم auto. أضف مفاتيح (🔑).")})
+            return None, 0
+        best = cands[0]
+        emit({"type": "notice", "text": tr("⚡ Model: {m} ({p}, context {c:,})", "⚡ النموذج: {m} ({p}، السياق {c:,})",
+                                           m=best.get("modelId"), p=best.get("platform"), c=int(best.get("contextWindow") or 0))})
+        return best.get("modelId"), int(best.get("contextWindow") or 0)
+
+    def failover_order(self) -> List[str]:
+        cfg = (self.ctx.cfg.get("gui") or {}).get("failover") or {}
+        return list(cfg.get("order") or ["freellmapi", "omniroute", "claude"])
+
+    def next_gateway(self, tried: set):
+        """The next gateway that can take over: installed (or Claude with a sign-in)."""
+        gws = self.ctx.gateways()
+        order = [n for n in self.failover_order() if n in gws] + [n for n in gws if n not in self.failover_order()]
+        for name in order:
+            if name in tried:
+                continue
+            gw = gws[name]
+            try:
+                if gw.type_name == "anthropic":
+                    if self.ctx.claude().auth_status().get("loggedIn"):
+                        return gw
+                elif gw.type_name == "custom":
+                    if gw.cfg.get("enabled", True) and (gw.is_up() or gw.start_spec()):
+                        return gw
+                elif gw.is_installed():
+                    return gw
+            except Exception:
+                continue
+        return None
+
+    def keys_status(self, gw_name: str) -> Dict[str, Any]:
+        from .freellmapi_admin import AdminError, NeedCredentials
+        gw = self.ctx.gateway(gw_name or "freellmapi")
+        try:
+            if flows.bring_up(self.ctx, gw, False):
+                self.started_gateways.add(gw.name)
+            return {"ok": True, **self.keys_admin(gw).status()}
+        except NeedCredentials as exc:
+            return {"ok": False, "need_credentials": True, "error": str(exc)}
+        except (AdminError, GatewayError, RuntimeError) as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def keys_action(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        gw = self.ctx.gateway(str(body.get("gateway") or "freellmapi"))
+        admin = self.keys_admin(gw)
+        action = str(body.get("action") or "")
+        if action == "credentials":
+            admin.save_credentials(str(body.get("email") or ""), str(body.get("password") or ""))
+            return self.keys_status(gw.name)
+        if action == "keyless":
+            enabled = admin.enable_keyless()
+            return {**self.keys_status(gw.name), "enabled": enabled}
+        if action == "add":
+            platform, key = str(body.get("platform") or ""), str(body.get("key") or "")
+            if not platform or not key.strip():
+                raise ValueError(tr("Choose the provider and paste the key.", "اختر المزوّد والصق المفتاح."))
+            added = admin.add_key(platform, key)
+            return {**self.keys_status(gw.name), "added": added}
+        raise ValueError("unknown action")
 
     def auto_resume_cfg(self) -> Dict[str, Any]:
         cfg = (self.ctx.cfg.get("gui") or {}).get("auto_resume")
@@ -1040,7 +1237,16 @@ class GuiApp:
                     emit({"type": "notice", "text": tr(
                         "New gateway → new Claude Code session, with a hand-over note of the work so far.",
                         "بوابة مختلفة ← جلسة Claude Code جديدة، مع ملف تسليم يلخص العمل السابق.")})
+            old_id = int(req.get("handoff_from") or 0)
+            if old_id and old_id != conv_id and not store.messages(conv_id) and store.conversation(old_id) is not None:
+                # "continue in a new chat": the old conversation was too long; start fresh with its summary
+                sent = self.handoff_prompt(old_id, tr("the previous chat grew too long", "المحادثة السابقة طالت كثيراً"), sent)
+                force_new = True
+                emit({"type": "notice", "text": tr("New chat that continues from a hand-over note of the old one.",
+                                                   "محادثة جديدة تكمل من ملف تسليم للمحادثة السابقة.")})
             user_meta = {"deep": deep, "memory": memory, "attachments": attachments}
+            if old_id:
+                user_meta["handoff_from"] = old_id
             if expert:
                 user_meta.update(expert=True, expert_chars=len(expert_answer))
             if resume_req:
@@ -1049,8 +1255,25 @@ class GuiApp:
 
             auto = self.auto_resume_cfg()
             attempt = 0
+            tried = {gw.name}
             while True:
                 diag = self._run_turn(conv_id, gw, model, project, project_id, sent, req, emit, force_new)
+                if diag is not None and not cancel.is_set() and req.get("failover") and \
+                        diag["reason"] in ("rate_limit", "usage_limit", "gateway_down") and diag.get("exhausted", True):
+                    nxt = self.next_gateway(tried)
+                    if nxt is not None:
+                        # ↪ every model of this gateway is busy: carry on elsewhere with a hand-over note
+                        tried.add(nxt.name)
+                        emit({"type": "notice", "text": tr(
+                            "↪ {a}: {why}. Switching to {b} with a hand-over note of the work so far.",
+                            "↪ {a}: {why}. التحويل إلى {b} مع ملف تسليم يلخص ما أُنجز.",
+                            a=gw.title, why=diag["title"], b=nxt.title)})
+                        gw, model, force_new = nxt, None, True
+                        sent = self.handoff_prompt(conv_id, diag["title"], self.continue_prompt(diag["title"]))
+                        label = tr("↪ Continue on {g}", "↪ متابعة عبر {g}", g=nxt.title)
+                        store.add_message(conv_id, "user", label, sent, {"resume": "handoff", "auto": True, "failover": nxt.name})
+                        emit({"type": "resume_start", "display": label, "sent": sent, "attempt": attempt, "gateway": nxt.name})
+                        continue
                 if diag is None or not auto["enabled"] or not diag["retry"] or cancel.is_set():
                     break
                 if attempt >= min(auto["max_attempts"], diag["attempts"] or auto["max_attempts"]):
@@ -1069,8 +1292,8 @@ class GuiApp:
                 if cancel.wait(diag["wait"]):
                     emit({"type": "notice", "text": tr("Automatic resume cancelled.", "أُلغيت المتابعة التلقائية.")})
                     break
-                force_new = diag["mode"] == "handoff"
-                sent = (self.handoff_prompt(conv_id, diag["title"], self.continue_prompt(diag["title"])) if force_new
+                force_new = diag["mode"] == "handoff" or bool(diag.get("new_model"))
+                sent = (self.handoff_prompt(conv_id, diag["title"], self.continue_prompt(diag["title"])) if diag["mode"] == "handoff"
                         else self.continue_prompt(diag["title"]))
                 label = AUTO_RESUME_LABEL.format(n=attempt, m=auto["max_attempts"])
                 store.add_message(conv_id, "user", label, sent, {"resume": diag["mode"], "auto": True})
@@ -1109,6 +1332,16 @@ class GuiApp:
             emit({"type": "saved", "message_id": mid, "meta": meta})
             return diag
         self.ctx.state.set("last_gateway", gw.name)
+        fast = model == FAST_MODEL
+        ctx_window = 0
+        if fast:
+            model, ctx_window = self.pick_fast_model(gw, emit)
+        base_meta["model"] = model or ""
+        if fast:
+            base_meta["fast"] = True
+        limit_env = self.context_env(gw, ctx_window)
+        if limit_env.get("CLAUDE_CODE_MAX_CONTEXT_TOKENS"):
+            base_meta["context_limit"] = int(limit_env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"])
 
         gui_cfg = self.ctx.cfg.get("gui") or {}
         mode = str(req.get("permission_mode") or gui_cfg.get("permission_mode") or "acceptEdits")
@@ -1155,7 +1388,8 @@ class GuiApp:
                                                            permission_mode=mode, allowed_tools=allowed,
                                                            effort=effort or None, approval=approval,
                                                            extra_args=self.run_extra_args(project_id, verify, visual),
-                                                           extra_env=hook_env, extra_servers=servers, account=account)
+                                                           extra_env={**limit_env, **(hook_env or {})},
+                                                           extra_servers=servers, account=account)
             tr_.mark("launch")
             with self.lock:
                 self.runs[run_id] = proc
@@ -1242,7 +1476,14 @@ class GuiApp:
                             subtype=str(tr_.result.get("subtype") or ""))
             if diag["reason"] == "session_missing":
                 store.update_conversation(conv_id, session_id=None, session_gateway=None)
+        if diag and fast and diag["reason"] == "rate_limit" and model:
+            # that model is busy: rest it and try the next fastest one at once
+            with self.lock:
+                self.model_cooldown[model] = time.time() + max(diag["wait"], 300)
+            diag.update(wait=3, new_model=True, exhausted=False,
+                        title=tr("{m} is rate-limited; trying the next fastest model", "{m} وصل حد الطلبات؛ تجربة النموذج الأسرع التالي", m=model))
         meta = {**base_meta, "parts": tr_.parts, "running": False, "timeline": tr_.timeline,
+                "context_tokens": tr_.context_tokens,
                 "ended_at": time.time(),
                 "model": model or tr_.model or gw.default_model(), "stopped": stopped, "approvals": approvals,
                 **{k: tr_.result.get(k) for k in ("cost_usd", "duration_ms", "num_turns", "is_error")}}
@@ -1639,17 +1880,17 @@ class GuiApp:
         t.join(600)
         return result[0] if result else ""
 
-    def build_report(self, conv_id: int) -> Dict[str, Any]:
+    def build_report(self, conv_id: int, compact: bool = False) -> Dict[str, Any]:
         store = self.store()
         conv = store.conversation(conv_id)
         if conv is None:
             raise ValueError(tr("Conversation not found.", "المحادثة غير موجودة."))
         proj = store.project(conv["project_id"]) if conv["project_id"] else None
         text = build_report_text(dict(conv), store.messages(conv_id), read_prompt(self.ctx, "report_header.txt", REPORT_HEADER),
-                                 dict(proj) if proj is not None else None)
+                                 dict(proj) if proj is not None else None, compact=compact)
         text = i18n.mask_models(i18n.brand(text))
         self.reports.mkdir(parents=True, exist_ok=True)
-        path = self.reports / f"report-{conv_id}-{time.strftime('%Y%m%d-%H%M%S')}.txt"
+        path = self.reports / f"report-{conv_id}-{time.strftime('%Y%m%d-%H%M%S')}{'-short' if compact else ''}.txt"
         path.write_text(text, encoding="utf-8")
         return {"path": str(path), "name": path.name, "text": text, "chars": len(text)}
 
@@ -1838,6 +2079,9 @@ class GuiApp:
             dirs.append(self.ctx.data_dir / "visual")
         args: List[str] = []
         sections: List[str] = []
+        rules = read_prompt(self.ctx, "run_rules.txt", "").strip()
+        if rules:
+            sections.append(rules)
         if (verify or visual) and self.verify_cfg()["work_method"]:
             sections.append(read_prompt(self.ctx, "work_method.txt", "").strip())
         if visual:
@@ -2037,6 +2281,8 @@ def make_handler(app: GuiApp):
                     self.wfile.write(data)
                 elif path == "/api/state":
                     self._json(200, app.state())
+                elif path == "/api/keys":
+                    self._json(200, app.keys_status((query.get("gateway") or ["freellmapi"])[0]))
                 elif path == "/api/visual":
                     self._json(200, app.visual_status())
                 elif path == "/api/image":
@@ -2163,6 +2409,8 @@ def make_handler(app: GuiApp):
                     return self._json(200, app.login(body.get("account") or None))
                 if path == "/api/logout":
                     return self._json(200, app.logout(body.get("account") or None))
+                if path == "/api/keys":
+                    return self._json(200, app.keys_action(body))
                 if path == "/api/bridge/prepare":
                     return self._json(200, app.bridge_prepare(body))
                 if path == "/api/bridge/preview":
@@ -2211,7 +2459,7 @@ def make_handler(app: GuiApp):
                         return self._json(400, {"error": tr("Folder not found: {p}", "المجلد غير موجود: {p}", p=p)})
                     return self._json(200, {"path": str(p.resolve())})
                 if m := re.fullmatch(r"/api/conversations/(\d+)/report", path):
-                    return self._json(200, app.build_report(int(m.group(1))))
+                    return self._json(200, app.build_report(int(m.group(1)), compact=bool(body.get("compact"))))
                 if path == "/api/preapprove":
                     cid = int(body.get("conversation_id") or 0)
                     if not cid:

@@ -8,4 +8,4 @@ Layers (matching the project diagram):
                 -> model providers (DeepSeek, Gemini, Qwen, ... configured in the gateway)
 """
 
-__version__ = "1.8.1"
+__version__ = "1.9.0"
