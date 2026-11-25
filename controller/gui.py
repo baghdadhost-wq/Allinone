@@ -68,6 +68,94 @@ def transcript_text(messages: Iterable[Dict[str, Any]]) -> str:
     return "\n\n---\n\n".join(parts)
 
 
+REPORT_HEADER = """أنت خبير برمجيات. هذا تقرير من أداة Allinone: محادثة نفّذ فيها Claude Code مهمة ولم يصل إلى نتيجة صحيحة.
+يحتوي التقرير على طلب المستخدم، والخطوات والأوامر التي جرّبها Claude Code مع نتائجها، والأخطاء التي ظهرت.
+المطلوب منك:
+1. حدّد السبب الجذري للمشكلة.
+2. اشرح لماذا لم تنجح الطرق السابقة.
+3. أعطِ حلاً عملياً خطوة بخطوة (أوامر أو تعديلات كود كاملة) يستطيع Claude Code تنفيذه مباشرة.
+"""
+
+EXPERT_TEMPLATE = """هذه إجابة من مستشار خارجي (نموذج آخر) على المشكلة في هذه المحادثة.
+اقرأها بعناية، وتحقق منها مقابل الملفات الفعلية، ثم نفّذ الحل المناسب خطوة بخطوة.
+إذا وجدت فيها خطأ أو شيئاً لا ينطبق على مشروعنا فوضّح ذلك واستخدم الأصح.
+{note}
+----- بداية الإجابة -----
+{answer}
+----- نهاية الإجابة -----"""
+
+REPORT_ASK = ("اقرأ تقرير الأخطاء المرفق. حدّد السبب الجذري، واشرح لماذا فشلت الطرق السابقة، "
+              "ثم أعطني حلاً كاملاً خطوة بخطوة.")
+
+
+def _clip(text: Any, limit: int) -> str:
+    s = text if isinstance(text, str) else json.dumps(text, ensure_ascii=False, indent=1, default=str)
+    s = s or ""
+    return s if len(s) <= limit else s[:limit] + f"\n… [قُطع {len(s) - limit} حرفاً]"
+
+
+def _part_is_error(p: Dict[str, Any]) -> bool:
+    return bool(p.get("is_error") or p.get("error"))
+
+
+def build_report_text(conv: Dict[str, Any], messages: List[Dict[str, Any]], header: str,
+                      project: Optional[Dict[str, Any]] = None) -> str:
+    """A plain-text report of what was asked, every step Claude Code took, and every error."""
+    out = [header.strip(), "", "=" * 70, "معلومات المحادثة", "=" * 70,
+           f"العنوان: {conv.get('title') or ''}",
+           f"مجلد العمل: {conv.get('project') or ''}",
+           f"آخر بوابة/نموذج: {conv.get('gateway') or ''} {('· ' + conv['model']) if conv.get('model') else ''}",
+           f"التاريخ: {time.strftime('%Y-%m-%d %H:%M')}"]
+    if project:
+        out.append(f"المشروع: {project.get('name')}")
+        if project.get("instructions"):
+            out += ["تعليمات المشروع:", _clip(project["instructions"], 3000)]
+    errors: List[str] = []
+    turn = 0
+    for m in messages:
+        meta = m.get("meta") or {}
+        if m["role"] == "user":
+            turn += 1
+            out += ["", "=" * 70, f"الدور {turn} — طلب المستخدم", "=" * 70, _clip(m.get("display") or "", 6000)]
+            if meta.get("attachments"):
+                out.append("الملفات المرفقة: " + ", ".join(meta["attachments"]))
+            if meta.get("expert"):
+                out += ["(هذه الرسالة إجابة خارجية رُفعت إلى المحادثة:)", _clip(m.get("sent") or "", 6000)]
+            continue
+        who = meta.get("gateway_title") or meta.get("gateway") or "Claude"
+        out += ["", f"--- رد Claude Code عبر {who}{(' · ' + meta['model']) if meta.get('model') else ''} ---"]
+        step = 0
+        for p in meta.get("parts") or [{"kind": "text", "text": m.get("display") or ""}]:
+            if p.get("kind") == "tool":
+                step += 1
+                bad = _part_is_error(p)
+                out += [f"[الخطوة {step}] {'✘ فشلت' if bad else '✔'} الأداة: {p.get('name')}",
+                        "  المدخلات:", "  " + _clip(p.get("input"), 2500).replace("\n", "\n  ")]
+                if p.get("result") is not None:
+                    out += ["  النتيجة:", "  " + _clip(p.get("result"), 2500).replace("\n", "\n  ")]
+                if bad:
+                    errors.append(f"الدور {turn}، الخطوة {step} ({p.get('name')}): " + _clip(p.get("result") or "", 600))
+            elif p.get("kind") == "text" and (p.get("text") or "").strip():
+                if _part_is_error(p):
+                    out += ["[خطأ]", _clip(p["text"], 3000)]
+                    errors.append(f"الدور {turn}: " + _clip(p["text"], 600))
+                else:
+                    out += ["[نص الرد]", _clip(p["text"], 4000)]
+        for a in meta.get("approvals") or []:
+            state = {"allow": "سُمح", "deny": "رُفض"}.get(a.get("behavior"), a.get("behavior"))
+            out.append(f"[إذن] {a.get('tool')}: {state}{' (إذن مسبق)' if a.get('auto') else ''}")
+        if meta.get("is_error") and not any(_part_is_error(p) for p in meta.get("parts") or []):
+            errors.append(f"الدور {turn}: انتهى الرد بحالة خطأ.")
+        bits = [f"{meta['duration_ms'] / 1000:.1f} ث" if meta.get("duration_ms") else "",
+                f"{meta['num_turns']} دورات" if meta.get("num_turns") else "",
+                "أُوقف يدوياً" if meta.get("stopped") else ""]
+        if any(bits):
+            out.append("(" + " · ".join(b for b in bits if b) + ")")
+    out += ["", "=" * 70, f"ملخص الأخطاء ({len(errors)})", "=" * 70]
+    out += [f"{i}. {e}" for i, e in enumerate(errors, 1)] or ["لم تُسجَّل أخطاء صريحة؛ راجع الخطوات أعلاه."]
+    return "\n".join(out) + "\n"
+
+
 class StreamTranslator:
     """Turns Claude Code stream-json lines into the small event set the page understands,
     and collects the assistant message to store."""
@@ -183,6 +271,8 @@ class GuiApp:
         self.run_conv: Dict[str, int] = {}
         self.pending: Dict[str, Dict[str, Any]] = {}
         self.conv_allowed: Dict[int, set] = {}
+        self.preapproved: set = set()
+        self.run_approvals: Dict[str, List[Dict[str, Any]]] = {}
         self.approval_timeout = 1800.0
         self.httpd = None
         self.stopped: set = set()
@@ -192,6 +282,8 @@ class GuiApp:
         self.allowed_hosts: set = set()
         self.uploads = ctx.data_dir / "uploads"
         self.transcripts = ctx.data_dir / "conversations"
+        self.reports = ctx.data_dir / "reports"
+        self.projects_dir = ctx.data_dir / "projects"
 
     def store(self) -> Store:
         st = getattr(self._local, "store", None)
@@ -225,6 +317,7 @@ class GuiApp:
             "efforts": EFFORTS,
             "deep_template": read_prompt(self.ctx, "deep_thinking.txt", ""),
             "max_upload_mb": self.max_upload() // (1024 * 1024),
+            "report_ask": read_prompt(self.ctx, "report_request.txt", REPORT_ASK),
         }
 
     def max_upload(self) -> int:
@@ -266,25 +359,46 @@ class GuiApp:
                         .replace("{message}", body))
         return body
 
+    def expert_prompt(self, answer: str, note: str) -> str:
+        tpl = read_prompt(self.ctx, "expert_answer.txt", EXPERT_TEMPLATE)
+        note_line = f"ملاحظة المستخدم: {note}" if note else ""  # same language as the template
+        if "{answer}" not in tpl:
+            tpl += "\n\n{answer}"
+        return tpl.replace("{note}", note_line).replace("{answer}", answer).strip()
+
     def chat(self, req: Dict[str, Any], emit) -> None:
         text = str(req.get("text") or "").strip()
+        expert = req.get("expert") if isinstance(req.get("expert"), dict) else None
+        expert_answer = str((expert or {}).get("answer") or "").strip()
+        if expert is not None:
+            if not expert_answer:
+                emit({"type": "error", "text": tr("The uploaded answer is empty.", "الإجابة المرفوعة فارغة.")})
+                return
+            text = text or tr("📥 External answer uploaded — apply it.", "📥 إجابة خارجية مرفوعة — طبّقها.")
         if not text:
             emit({"type": "error", "text": tr("Empty message.", "الرسالة فارغة.")})
             return
         gw = self.ctx.gateway(req.get("gateway"))
         model = str(req.get("model") or "").strip() or None
-        project = Path(str(req.get("project") or self.project)).expanduser()
-        if not project.is_dir():
-            emit({"type": "error", "text": tr("Project folder not found: {p}", "مجلد المشروع غير موجود: {p}", p=project)})
-            return
         store = self.store()
         conv_id = int(req.get("conversation_id") or 0)
         conv = store.conversation(conv_id) if conv_id else None
+        project_id = conv["project_id"] if conv is not None else (int(req.get("project_id") or 0) or None)
+        proj = store.project(project_id) if project_id else None
+        if proj is None:
+            project_id = None
+        folder = req.get("project") or (proj["folder"] if proj is not None and proj["folder"] else "") or self.project
+        project = Path(str(folder)).expanduser()
+        if not project.is_dir():
+            emit({"type": "error", "text": tr("Project folder not found: {p}", "مجلد المشروع غير موجود: {p}", p=project)})
+            return
         if conv is None:
             title = re.sub(r"\s+", " ", text)[:60]
-            conv_id = store.new_conversation(title, gw.name, model or "", str(project))
+            conv_id = store.new_conversation(title, gw.name, model or "", str(project), project_id=project_id)
             conv = store.conversation(conv_id)
-            emit({"type": "conversation", "id": conv_id, "title": title})
+            emit({"type": "conversation", "id": conv_id, "title": title, "project_id": project_id})
+        if "preapprove" in req:
+            self.set_preapprove(conv_id, bool(req.get("preapprove")))
         with self.lock:
             if conv_id in self.busy:
                 emit({"type": "error", "text": tr("This conversation is still running.", "هذه المحادثة ما زالت قيد التنفيذ.")})
@@ -294,8 +408,11 @@ class GuiApp:
         try:
             deep, memory = bool(req.get("deep")), bool(req.get("memory"))
             attachments = [str(a) for a in (req.get("attachments") or [])]
-            sent = self.build_prompt(conv_id, text, deep, memory, attachments)
+            body = self.expert_prompt(expert_answer, text if expert and req.get("text") else "") if expert else text
+            sent = self.build_prompt(conv_id, body, deep, memory, attachments)
             user_meta = {"deep": deep, "memory": memory, "attachments": attachments}
+            if expert:
+                user_meta.update(expert=True, expert_chars=len(expert_answer))
             store.add_message(conv_id, "user", text, sent, user_meta)
             emit({"type": "start", "run_id": run_id, "conversation_id": conv_id, "sent": sent})
 
@@ -333,12 +450,14 @@ class GuiApp:
             with self.lock:
                 self.run_emit[run_id] = locked_emit
                 self.run_conv[run_id] = conv_id
+                self.run_approvals[run_id] = []
             approval = None
             if mode != "bypassPermissions":
                 approval = {"url": self.base_url() + "/internal/approval", "token": self.token, "run_id": run_id}
             proc, session = self.ctx.claude().start_stream(gw, model, project, sent, resume=resume,
                                                            permission_mode=mode, allowed_tools=allowed,
-                                                           effort=effort or None, approval=approval)
+                                                           effort=effort or None, approval=approval,
+                                                           extra_args=self.run_extra_args(project_id))
             with self.lock:
                 self.runs[run_id] = proc
                 self.run_gateways[run_id] = gw.name
@@ -380,6 +499,7 @@ class GuiApp:
                     self.run_gateways.pop(run_id, None)
                     self.run_emit.pop(run_id, None)
                     self.run_conv.pop(run_id, None)
+                    approvals = self.run_approvals.pop(run_id, [])
             stopped = run_id in self.stopped
             if tr_.result is None:
                 msg = tr("Stopped.", "تم الإيقاف.") if stopped else "\n".join(err_tail[-15:]) or tr(
@@ -394,7 +514,7 @@ class GuiApp:
                 store.update_conversation(conv_id, session_id=tr_.session_id, session_gateway=gw.name,
                                           gateway=gw.name, model=model or "")
             meta = {"parts": tr_.parts, "gateway": gw.name, "gateway_title": gw.title,
-                    "model": model or tr_.model or gw.default_model(), "stopped": stopped,
+                    "model": model or tr_.model or gw.default_model(), "stopped": stopped, "approvals": approvals,
                     **{k: tr_.result.get(k) for k in ("cost_usd", "duration_ms", "num_turns", "is_error")}}
             mid = store.add_message(conv_id, "assistant", tr_.final_text(), meta=meta)
             emit({"type": "saved", "message_id": mid, "meta": meta})
@@ -415,6 +535,13 @@ class GuiApp:
             conv = self.run_conv.get(run_id)
             if conv is not None and tool_name in self.conv_allowed.get(conv, set()):
                 return {"behavior": "allow", "updatedInput": tool_input}
+            auto = conv is not None and conv in self.preapproved
+            if emit is not None:
+                self.run_approvals.setdefault(run_id, []).append({"tool": tool_name, "behavior": "allow" if auto else "",
+                                                                  "auto": auto})
+            if emit is not None and auto:
+                emit({"type": "approval_auto", "tool": tool_name, "input": tool_input})
+                return {"behavior": "allow", "updatedInput": tool_input}
             if emit is None:
                 return {"behavior": "deny", "message": "This run is no longer attached to the GUI."}
             aid = secrets.token_hex(5)
@@ -428,7 +555,25 @@ class GuiApp:
         decision = item["decision"] if answered and item["decision"] else {
             "behavior": "deny", "message": tr("No answer from the user in time.", "لم يُجب المستخدم في الوقت المحدد.")}
         emit({"type": "approval_done", "id": aid, "behavior": decision["behavior"]})
+        with self.lock:
+            for rec in reversed(self.run_approvals.get(run_id, [])):
+                if rec["tool"] == tool_name and not rec["behavior"]:
+                    rec["behavior"] = decision["behavior"]
+                    break
         return decision
+
+    def set_preapprove(self, conv_id: int, on: bool) -> int:
+        """Pre-approve (or stop pre-approving) Claude Code permission requests in one conversation.
+        Turning it on also answers the requests already waiting in that conversation."""
+        with self.lock:
+            if on:
+                self.preapproved.add(conv_id)
+            else:
+                self.preapproved.discard(conv_id)
+            waiting = [a for a, i in self.pending.items() if on and self.run_conv.get(i["run_id"]) == conv_id]
+        for aid in waiting:
+            self.answer_approval(aid, True)
+        return len(waiting)
 
     def answer_approval(self, aid: str, allow: bool, scope: str = "once", message: str = "") -> bool:
         with self.lock:
@@ -525,6 +670,80 @@ class GuiApp:
         t.join(600)
         return result[0] if result else ""
 
+    def build_report(self, conv_id: int) -> Dict[str, Any]:
+        store = self.store()
+        conv = store.conversation(conv_id)
+        if conv is None:
+            raise ValueError(tr("Conversation not found.", "المحادثة غير موجودة."))
+        proj = store.project(conv["project_id"]) if conv["project_id"] else None
+        text = build_report_text(dict(conv), store.messages(conv_id), read_prompt(self.ctx, "report_header.txt", REPORT_HEADER),
+                                 dict(proj) if proj is not None else None)
+        self.reports.mkdir(parents=True, exist_ok=True)
+        path = self.reports / f"report-{conv_id}-{time.strftime('%Y%m%d-%H%M%S')}.txt"
+        path.write_text(text, encoding="utf-8")
+        return {"path": str(path), "name": path.name, "text": text, "chars": len(text)}
+
+    def project_files_dir(self, project_id: int) -> Path:
+        return self.projects_dir / str(project_id) / "files"
+
+    def project_payload(self, project_id: int) -> Optional[Dict[str, Any]]:
+        store = self.store()
+        proj = store.project(project_id)
+        if proj is None:
+            return None
+        data = dict(proj)
+        data["files"] = [dict(r) for r in store.project_files(project_id)]
+        data["conversations"] = [dict(r) for r in store.conversations(project_id=project_id)]
+        return data
+
+    def run_extra_args(self, project_id: Optional[int]) -> List[str]:
+        """Folders Claude Code may read besides the working folder, plus the project's instructions."""
+        dirs = [self.uploads, self.reports, self.transcripts]
+        args: List[str] = []
+        proj = self.store().project(project_id) if project_id else None
+        if proj is not None:
+            files = self.store().project_files(project_id)
+            dirs.append(self.project_files_dir(project_id))
+            lines = [f"# مشروع: {proj['name']}"]
+            if proj["description"]:
+                lines += ["", proj["description"]]
+            if proj["instructions"].strip():
+                lines += ["", "## تعليمات المشروع (اتبعها في كل رد)", proj["instructions"].strip()]
+            if files:
+                lines += ["", "## ملفات معرفة المشروع (اقرأ منها ما يلزم قبل الإجابة)"]
+                lines += [f"- {f['name']}: {f['path']}" for f in files]
+            prompt_file = self.projects_dir / str(project_id) / "system-prompt.md"
+            prompt_file.parent.mkdir(parents=True, exist_ok=True)
+            prompt_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            args += ["--append-system-prompt-file", str(prompt_file)]
+        for d in dirs:
+            d.mkdir(parents=True, exist_ok=True)
+            args += ["--add-dir", str(d)]
+        return args
+
+    def save_project(self, project_id: Optional[int], body: Dict[str, Any]) -> int:
+        fields = {k: body[k] for k in self.store().PROJECT_FIELDS if k in body}
+        if fields.get("folder"):
+            folder = Path(str(fields["folder"])).expanduser()
+            if not folder.is_dir():
+                raise ValueError(tr("Folder not found: {p}", "المجلد غير موجود: {p}", p=folder))
+            fields["folder"] = str(folder.resolve())
+        if "name" in fields:
+            fields["name"] = str(fields["name"] or "").strip()[:120] or tr("Project", "مشروع")
+        if "instructions" in fields:
+            fields["instructions"] = str(fields["instructions"] or "")[:100000]
+        if project_id:
+            if self.store().project(project_id) is None:
+                raise ValueError(tr("Project not found.", "المشروع غير موجود."))
+            self.store().update_project(project_id, **fields)
+            return project_id
+        return self.store().new_project(**fields)
+
+    def delete_project(self, project_id: int) -> None:
+        self.store().delete_project(project_id)
+        import shutil
+        shutil.rmtree(self.projects_dir / str(project_id), ignore_errors=True)
+
     def export_markdown(self, conv_id: int) -> str:
         conv = self.store().conversation(conv_id)
         lines = [f"# {conv['title'] if conv else conv_id}", ""]
@@ -578,7 +797,7 @@ def make_handler(app: GuiApp):
                     break
                 length -= len(chunk)
 
-        def _upload(self, query: Dict[str, List[str]]) -> None:
+        def _upload(self, query: Dict[str, List[str]], project_id: Optional[int] = None) -> None:
             length = int(self.headers.get("Content-Length") or 0)
             name = (query.get("name") or ["file"])[0]
             limit = app.max_upload()
@@ -587,7 +806,15 @@ def make_handler(app: GuiApp):
                 return self._json(413, {"error": tr("{n} is too large ({s} MB, limit {l} MB).",
                                                     "الملف {n} كبير جداً ({s} MB، والحد {l} MB).", n=name,
                                                     s=length // (1024 * 1024), l=limit // (1024 * 1024))})
-            path = app.upload_path(name)
+            if project_id is not None:
+                if app.store().project(project_id) is None:
+                    self._discard(length)
+                    return self._json(404, {"error": tr("Project not found.", "المشروع غير موجود.")})
+                folder = app.project_files_dir(project_id)
+                folder.mkdir(parents=True, exist_ok=True)
+                path = folder / app.upload_path(name).name
+            else:
+                path = app.upload_path(name)
             remaining = length
             with open(path, "wb") as fh:
                 while remaining > 0:
@@ -599,6 +826,10 @@ def make_handler(app: GuiApp):
             if remaining:
                 path.unlink()
                 return self._json(400, {"error": tr("Upload of {n} was interrupted.", "انقطع رفع الملف {n}.", n=name)})
+            if project_id is not None:
+                fid = app.store().add_project_file(project_id, Path(name.replace("\\", "/")).name[:120] or "file",
+                                                   str(path), length)
+                return self._json(200, {"id": fid, "path": str(path), "size": length})
             self._json(200, {"path": str(path), "size": length})
 
         def _body(self) -> Dict[str, Any]:
@@ -647,14 +878,27 @@ def make_handler(app: GuiApp):
                 elif path == "/api/auth":
                     self._json(200, app.ctx.claude().auth_status())
                 elif path == "/api/conversations":
-                    rows = app.store().conversations(query=(query.get("q") or [""])[0])
+                    pid = (query.get("project") or [""])[0]
+                    rows = app.store().conversations(query=(query.get("q") or [""])[0],
+                                                     project_id=int(pid) if pid.isdigit() else None)
                     self._json(200, {"conversations": [dict(r) for r in rows]})
                 elif m := re.fullmatch(r"/api/conversations/(\d+)", path):
                     cid = int(m.group(1))
                     conv = app.store().conversation(cid)
                     if not conv:
                         return self._json(404, {"error": "not found"})
-                    self._json(200, {"conversation": dict(conv), "messages": app.store().messages(cid)})
+                    data = dict(conv)
+                    data["preapproved"] = cid in app.preapproved
+                    proj = app.store().project(conv["project_id"]) if conv["project_id"] else None
+                    data["project_name"] = proj["name"] if proj is not None else ""
+                    self._json(200, {"conversation": data, "messages": app.store().messages(cid)})
+                elif path == "/api/projects":
+                    self._json(200, {"projects": app.store().projects()})
+                elif m := re.fullmatch(r"/api/projects/(\d+)", path):
+                    data = app.project_payload(int(m.group(1)))
+                    if data is None:
+                        return self._json(404, {"error": "not found"})
+                    self._json(200, {"project": data})
                 elif m := re.fullmatch(r"/api/conversations/(\d+)/export", path):
                     data = app.export_markdown(int(m.group(1))).encode("utf-8")
                     self.send_response(200)
@@ -675,11 +919,24 @@ def make_handler(app: GuiApp):
             g = self._guard()
             if g is None:
                 return
-            m = re.fullmatch(r"/api/conversations/(\d+)", g[0])
-            if not m:
-                return self._json(404, {"error": "not found"})
-            app.store().delete_conversation(int(m.group(1)))
-            self._json(200, {"ok": True})
+            if m := re.fullmatch(r"/api/conversations/(\d+)", g[0]):
+                app.store().delete_conversation(int(m.group(1)))
+                return self._json(200, {"ok": True})
+            if m := re.fullmatch(r"/api/projects/(\d+)", g[0]):
+                app.delete_project(int(m.group(1)))
+                return self._json(200, {"ok": True})
+            if m := re.fullmatch(r"/api/projects/(\d+)/files/(\d+)", g[0]):
+                rows = {r["id"]: r for r in app.store().project_files(int(m.group(1)))}
+                if int(m.group(2)) not in rows:
+                    return self._json(404, {"error": "not found"})
+                path = app.store().remove_project_file(int(m.group(2)))
+                try:
+                    if path:
+                        Path(path).unlink()
+                except OSError:
+                    pass
+                return self._json(200, {"ok": True})
+            self._json(404, {"error": "not found"})
 
         def do_POST(self):
             g = self._guard()
@@ -689,6 +946,8 @@ def make_handler(app: GuiApp):
             try:
                 if path == "/api/upload":
                     return self._upload(query)
+                if m := re.fullmatch(r"/api/projects/(\d+)/files", path):
+                    return self._upload(query, project_id=int(m.group(1)))
                 body = self._body()
                 if path == "/internal/approval":
                     return self._json(200, app.request_approval(str(body.get("run_id") or ""),
@@ -744,6 +1003,19 @@ def make_handler(app: GuiApp):
                     if not p.is_dir():
                         return self._json(400, {"error": tr("Folder not found: {p}", "المجلد غير موجود: {p}", p=p)})
                     return self._json(200, {"path": str(p.resolve())})
+                if m := re.fullmatch(r"/api/conversations/(\d+)/report", path):
+                    return self._json(200, app.build_report(int(m.group(1))))
+                if path == "/api/preapprove":
+                    cid = int(body.get("conversation_id") or 0)
+                    if not cid:
+                        return self._json(400, {"error": "conversation_id"})
+                    return self._json(200, {"ok": True, "answered": app.set_preapprove(cid, bool(body.get("on")))})
+                if path == "/api/projects":
+                    pid = app.save_project(None, body)
+                    return self._json(200, {"project": app.project_payload(pid)})
+                if m := re.fullmatch(r"/api/projects/(\d+)", path):
+                    pid = app.save_project(int(m.group(1)), body)
+                    return self._json(200, {"project": app.project_payload(pid)})
                 if m := re.fullmatch(r"/api/conversations/(\d+)/rename", path):
                     app.store().update_conversation(int(m.group(1)), title=str(body.get("title") or "")[:120])
                     return self._json(200, {"ok": True})

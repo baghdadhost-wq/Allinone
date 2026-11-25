@@ -237,8 +237,8 @@ class GuiServerTests(unittest.TestCase):
         saved = self.of(result["events"], "saved")[0]["meta"]
         self.assertTrue(saved["stopped"])
 
-    def upload(self, name, data):
-        req = urllib.request.Request(f"http://127.0.0.1:{self.port}/api/upload?name=" + urllib.request.quote(name),
+    def upload(self, name, data, target="/api/upload"):
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}{target}?name=" + urllib.request.quote(name),
                                      data=data, method="POST")
         req.add_header("X-Allinone-Token", self.app.token)
         req.add_header("Content-Type", "application/octet-stream")
@@ -312,6 +312,152 @@ class GuiServerTests(unittest.TestCase):
         self.assertEqual(json.loads(raw)["path"], str(self.sb.project.resolve()))
         ev = self.chat(text="x", gateway="fake", project=str(self.sb.tmp / "missing"))
         self.assertTrue(self.of(ev, "error"))
+
+    # ------------------------------------------------- report / answer / pre-approval / projects
+    def test_error_report_and_uploaded_answer(self):
+        ev = self.chat(text="please USE_TOOL now", gateway="fake")
+        conv_id = self.of(ev, "conversation")[0]["id"]
+        th, box = self._chat_async(text="run NEED_APPROVAL", gateway="fake", conversation_id=conv_id)
+        item = self._wait_pending()[0]
+        self.call("/api/approval", {"id": item["id"], "allow": False})
+        th.join(90)
+
+        status, raw = self.call(f"/api/conversations/{conv_id}/report", {})
+        self.assertEqual(status, 200, raw)
+        rep = json.loads(raw)
+        text = rep["text"]
+        self.assertTrue(Path(rep["path"]).is_file())
+        self.assertIn(str(self.ctx.data_dir / "reports"), rep["path"])
+        self.assertEqual(Path(rep["path"]).read_text(encoding="utf-8"), text)
+        self.assertIn("أنت خبير برمجيات", text)              # header from config/prompts/report_header.txt
+        self.assertIn("please USE_TOOL now", text)           # what was asked
+        self.assertIn("hello.txt", text)                     # the tool input
+        self.assertIn("File created", text)                  # its result
+        self.assertIn("✘", text)                             # the failed step is marked
+        self.assertIn("Permission denied", text)
+        self.assertIn("[إذن] Bash: رُفض", text)               # the approval decision
+        self.assertIn("ملخص الأخطاء (1)", text)
+        self.assertEqual(self.call("/api/conversations/999/report", {})[0], 400)
+        state = json.loads(self.call("/api/state")[1])
+        self.assertIn("تقرير", state["report_ask"])
+
+        answer = "السبب: npm غير مثبت.\nالحل: ثبّت Node ثم أعد npm test."
+        ev = self.chat(text="من Claude.ai", gateway="fake", conversation_id=conv_id, expert={"answer": answer})
+        sent = self.of(ev, "start")[0]["sent"]
+        self.assertIn(answer, sent)
+        self.assertIn("مستشار خارجي", sent)
+        self.assertIn("ملاحظة المستخدم: من Claude.ai", sent)
+        self.assertEqual(self.sb.read_record()["prompt"], sent)
+        last_user = [m for m in self.ctx.store().messages(conv_id) if m["role"] == "user"][-1]
+        self.assertEqual(last_user["display"], "من Claude.ai")   # the page shows the note, not the long answer
+        self.assertTrue(last_user["meta"]["expert"])
+        ev = self.chat(text="", gateway="fake", conversation_id=conv_id, expert={"answer": "  "})
+        self.assertTrue(self.of(ev, "error"))
+        ev = self.chat(gateway="fake", conversation_id=conv_id, expert={"answer": "do X"})
+        self.assertIn("📥", self.of(ev, "start")[0]["sent"] and
+                      [m for m in self.ctx.store().messages(conv_id) if m["role"] == "user"][-1]["display"])
+
+    def test_preapproval(self):
+        th, box = self._chat_async(text="NEED_APPROVAL NEED_APPROVAL", gateway="fake", preapprove=True)
+        th.join(90)
+        ev = box["events"]
+        self.assertEqual(self.of(ev, "approval"), [])          # no permission card at all
+        self.assertEqual(len(self.of(ev, "approval_auto")), 2)
+        self.assertEqual([r["content"] for r in self.of(ev, "tool_result")], ["tests passed", "tests passed"])
+        conv_id = self.of(ev, "conversation")[0]["id"]
+        self.assertTrue(json.loads(self.call(f"/api/conversations/{conv_id}")[1])["conversation"]["preapproved"])
+        saved = self.of(ev, "saved")[0]["meta"]
+        self.assertEqual([a["auto"] for a in saved["approvals"]], [True, True])
+
+        # turned off -> the card comes back; turning it on while a request waits answers it
+        self.call("/api/preapprove", {"conversation_id": conv_id, "on": False})
+        th, box = self._chat_async(text="NEED_APPROVAL", gateway="fake", conversation_id=conv_id)
+        self._wait_pending()
+        res = json.loads(self.call("/api/preapprove", {"conversation_id": conv_id, "on": True})[1])
+        self.assertEqual(res["answered"], 1)
+        th.join(90)
+        self.assertEqual(self.of(box["events"], "tool_result")[0]["content"], "tests passed")
+
+        # other conversations are not affected
+        th, box = self._chat_async(text="NEED_APPROVAL", gateway="fake")
+        item = self._wait_pending()[0]
+        self.call("/api/approval", {"id": item["id"], "allow": True})
+        th.join(90)
+        self.assertEqual(len(self.of(box["events"], "approval")), 1)
+
+    def test_projects(self):
+        folder = self.sb.tmp / "proj-folder"
+        folder.mkdir()
+        status, raw = self.call("/api/projects", {"name": "متجر", "description": "موقع المتجر",
+                                                  "instructions": "اكتب الكود بلغة TypeScript دائماً.",
+                                                  "folder": str(folder), "gateway": "fake"})
+        self.assertEqual(status, 200, raw)
+        pid = json.loads(raw)["project"]["id"]
+        self.assertEqual(self.call("/api/projects", {"name": "x", "folder": str(self.sb.tmp / "nope")})[0], 400)
+        status, f = self.upload("دليل.md", "# الدليل".encode(), target=f"/api/projects/{pid}/files")
+        self.assertEqual(status, 200, f)
+        self.assertTrue(Path(f["path"]).is_file())
+        self.assertEqual(self.upload("a.txt", b"x", target="/api/projects/999/files")[0], 404)
+
+        ev = self.chat(text="ابدأ", gateway="fake", project_id=pid, project="")
+        conv_id = self.of(ev, "conversation")[0]["id"]
+        rec = self.sb.read_record()
+        self.assertEqual(Path(rec["cwd"]).resolve(), folder.resolve())   # the project's folder is used
+        argv = rec["argv"]
+        prompt_file = Path(argv[argv.index("--append-system-prompt-file") + 1])
+        sys_prompt = prompt_file.read_text(encoding="utf-8")
+        self.assertIn("اكتب الكود بلغة TypeScript دائماً.", sys_prompt)
+        self.assertIn(f["path"], sys_prompt)
+        add_dirs = [argv[i + 1] for i, a in enumerate(argv) if a == "--add-dir"]
+        self.assertIn(str(Path(f["path"]).parent), add_dirs)
+        self.assertIn(str(self.ctx.data_dir / "uploads"), add_dirs)
+
+        # later messages stay in the project even if the page does not resend project_id
+        self.chat(text="تابع", gateway="fake", conversation_id=conv_id)
+        self.assertIn("--append-system-prompt-file", self.sb.read_record()["argv"])
+        proj = json.loads(self.call(f"/api/projects/{pid}")[1])["project"]
+        self.assertEqual([c["id"] for c in proj["conversations"]], [conv_id])
+        self.assertEqual(len(proj["files"]), 1)
+        listed = json.loads(self.call("/api/projects")[1])["projects"]
+        self.assertEqual((listed[0]["chats"], listed[0]["files"]), (1, 1))
+        self.assertEqual(json.loads(self.call(f"/api/conversations?project={pid}")[1])["conversations"][0]["id"], conv_id)
+        self.assertEqual(json.loads(self.call(f"/api/conversations/{conv_id}")[1])["conversation"]["project_name"], "متجر")
+        self.assertIn("المشروع: متجر", json.loads(self.call(f"/api/conversations/{conv_id}/report", {})[1])["text"])
+
+        self.call(f"/api/projects/{pid}", {"instructions": "تعليمات جديدة"})
+        self.chat(text="مرة أخرى", gateway="fake", conversation_id=conv_id)
+        self.assertIn("تعليمات جديدة", prompt_file.read_text(encoding="utf-8"))
+        self.call(f"/api/projects/{pid}/files/{f['id']}", method="DELETE")
+        self.assertFalse(Path(f["path"]).exists())
+
+        ev = self.chat(text="عادي", gateway="fake")              # chats outside a project get no project prompt
+        self.assertNotIn("--append-system-prompt-file", self.sb.read_record()["argv"])
+        self.call(f"/api/projects/{pid}", method="DELETE")
+        self.assertEqual(json.loads(self.call("/api/projects")[1])["projects"], [])
+        self.assertIsNone(self.ctx.store().conversation(conv_id)["project_id"])  # the chat is kept
+        self.assertFalse((self.ctx.data_dir / "projects" / str(pid)).exists())
+
+
+class StoreMigrationTests(unittest.TestCase):
+    def test_old_database_gets_project_column(self):
+        import sqlite3
+        import tempfile
+        from controller.store import Store
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "old.db"
+            conn = sqlite3.connect(db)
+            conn.execute("CREATE TABLE conversations (id INTEGER PRIMARY KEY AUTOINCREMENT, created REAL NOT NULL, "
+                         "updated REAL NOT NULL, title TEXT NOT NULL, gateway TEXT NOT NULL DEFAULT '', model TEXT NOT "
+                         "NULL DEFAULT '', project TEXT NOT NULL DEFAULT '', session_id TEXT, session_gateway TEXT)")
+            conn.execute("INSERT INTO conversations(created, updated, title) VALUES (1, 1, 'old chat')")
+            conn.commit()
+            conn.close()
+            st = Store(db)
+            self.assertEqual(st.conversations()[0]["title"], "old chat")
+            self.assertIsNone(st.conversations()[0]["project_id"])
+            pid = st.new_project(name="p")
+            cid = st.new_conversation("new", "fake", "", tmp, project_id=pid)
+            self.assertEqual([r["id"] for r in st.conversations(project_id=pid)], [cid])
 
 
 class TranslatorTests(unittest.TestCase):

@@ -134,6 +134,11 @@ cd Allinone
 - **👁 إظهار النص المرسل**: يعرض النص الكامل الذي أُرسل فعلاً بدل سؤالك فقط.
 - **⏻ تشغيل/إيقاف البوابة**: زر بجانب «لوحة التحكم» يشغّل البوابة المختارة أو يوقفها لتوفير الذاكرة. وزر «⏻ إغلاق Allinone» أسفل القائمة الجانبية يغلق البرنامج كله، ويوقف البوابات التي شغّلها.
 - **تسجيل الدخول إلى Claude**: اختر Claude ثم زر «تسجيل الدخول»، فتفتح نافذة تسجيل الدخول إلى حسابك (اشتراك Claude أو Anthropic Console).
+- **🧾 تقرير الأخطاء** (أعلى الصفحة): يجمع في ملف txt طلبك وكل خطوة جرّبها Claude Code (الأداة، مدخلاتها، نتيجتها، والفاشلة منها معلّمة ✘) وقرارات الإذن وملخصاً للأخطاء. يُحفظ في `data/reports/`، ويمكنك تنزيله أو نسخه لتلصقه في نموذج أذكى (مثل Claude.ai)، أو «إرسال إلى نموذج آخر» فيُرفق بمحادثة جديدة على البوابة التي تختارها. رأس التقرير (ما يُطلب من النموذج) في `config/prompts/report_header.txt`.
+- **📥 رفع إجابة**: الصق الإجابة التي حصلت عليها، أو اختر ملف txt/md، مع ملاحظة اختيارية، فتُرسل إلى المحادثة الحالية مع طلب أن يتحقق Claude Code منها ثم يطبّقها على المشروع. في المحادثة تظهر ملاحظتك فقط، والإجابة كاملة تظهر مع «إظهار النص المرسل». القالب في `config/prompts/expert_answer.txt`.
+  الطريقة المقترحة: 🧾 تقرير ← نموذج أذكى ← 📥 رفع الإجابة ← Claude Code ينفّذ.
+- **🔒/🔓 إذن مسبق** (أعلى الصفحة): فعّله قبل أن يطلب Claude Code الإذن، فيُسمح تلقائياً بطلباته في هذه المحادثة دون بطاقة سؤال، ويظهر سطر صغير «سُمح تلقائياً» لكل طلب. إذا لم تفعّله تظهر بطاقة الإذن كالمعتاد. وإذا فعّلته وبطاقة تنتظر، يُسمح بها فوراً. يبقى الإذن المسبق ما دامت نافذة Allinone مفتوحة.
+- **📂 المشاريع** (تبويب «المشاريع» في القائمة الجانبية، مثل مشاريع Claude): لكل مشروع اسم ووصف و**تعليمات** تُرسل إلى Claude Code في كل محادثة داخله، و**ملفات معرفة** (مستندات، أكواد...) يقرأ منها، و**مجلد عمل** خاص، وبوابة ونموذج افتراضيان، و**محادثاته** الخاصة. افتح المشروع ثم «+ محادثة جديدة في المشروع». الملفات في `data/projects/<رقم>/files/`.
 - **مميزات أخرى**:
   - الردود تظهر أثناء كتابتها، مع زر إيقاف.
   - بطاقات تعرض كل أداة يستخدمها Claude Code (تعديل ملف، أمر طرفية...) ونتيجتها.
@@ -301,4 +306,5 @@ Allinone installs **Claude Code**, **OmniRoute** and **FreeLLMAPI** side by side
   - a SessionStart context hook;
   - headless runs and a task queue stored in SQLite;
   - a patch workflow that keeps your edits to the gateways' source across updates.
+  - a local Claude-style GUI (`gui.cmd`): gateway switch, deep thinking, Memory, permission cards with pre-approval, an errors-and-approaches report for a smarter model, uploading that model's answer back, and Claude-style Projects (instructions, knowledge files, folder, chats).
 - **Get started**: run `install.cmd` (Windows) or `./install.sh`, then `allinone`. See `docs/CUSTOMIZE.md` and `docs/TROUBLESHOOTING.md`.

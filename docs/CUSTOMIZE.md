@@ -282,3 +282,13 @@ OmniRoute مثبت افتراضياً من npm، وهي حزمة جاهزة. ل�
   "keep_gateway_running": true
 }
 ```
+
+## قوالب الواجهة (تقرير الأخطاء ورفع الإجابة)
+
+| الملف | ما يتحكم فيه |
+|---|---|
+| `config/prompts/report_header.txt` | النص أعلى ملف 🧾 تقرير الأخطاء، أي ما يُطلب من النموذج الأذكى |
+| `config/prompts/report_request.txt` | الرسالة الجاهزة عند «إرسال التقرير إلى نموذج آخر» |
+| `config/prompts/expert_answer.txt` | كيف تُغلَّف الإجابة المرفوعة 📥 (`{answer}` و`{note}`) |
+
+تعليمات المشاريع تُكتب من الواجهة، وتُرسل إلى Claude Code عبر `--append-system-prompt-file`. وتُضاف مجلدات `data/uploads` و`data/reports` و`data/conversations` وملفات المشروع عبر `--add-dir` حتى يقرأها Claude Code دون أن يطلب إذناً.

@@ -52,6 +52,25 @@ CREATE TABLE IF NOT EXISTS messages (
     meta        TEXT NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS messages_conv ON messages(conv_id, id);
+CREATE TABLE IF NOT EXISTS projects (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    created      REAL NOT NULL,
+    updated      REAL NOT NULL,
+    name         TEXT NOT NULL,
+    description  TEXT NOT NULL DEFAULT '',
+    instructions TEXT NOT NULL DEFAULT '',
+    folder       TEXT NOT NULL DEFAULT '',
+    gateway      TEXT NOT NULL DEFAULT '',
+    model        TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS project_files (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id  INTEGER NOT NULL,
+    created     REAL NOT NULL,
+    name        TEXT NOT NULL,
+    path        TEXT NOT NULL,
+    size        INTEGER NOT NULL DEFAULT 0
+);
 CREATE TABLE IF NOT EXISTS memory (
     id      INTEGER PRIMARY KEY AUTOINCREMENT,
     created REAL NOT NULL,
@@ -69,6 +88,10 @@ def connect(path: Path) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=10000")
     conn.executescript(SCHEMA)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(conversations)")}
+    if "project_id" not in cols:  # databases created by earlier versions
+        conn.execute("ALTER TABLE conversations ADD COLUMN project_id INTEGER")
+        conn.commit()
     return conn
 
 
@@ -144,18 +167,22 @@ class Store:
         return cur.rowcount > 0
 
     # ------------------------------------------------------ conversations (GUI)
-    def new_conversation(self, title: str, gateway: str, model: str, project: str) -> int:
+    def new_conversation(self, title: str, gateway: str, model: str, project: str,
+                         project_id: Optional[int] = None) -> int:
         now = time.time()
         cur = self.conn.execute(
-            "INSERT INTO conversations(created, updated, title, gateway, model, project) VALUES (?,?,?,?,?,?)",
-            (now, now, title, gateway, model, project))
+            "INSERT INTO conversations(created, updated, title, gateway, model, project, project_id) "
+            "VALUES (?,?,?,?,?,?,?)", (now, now, title, gateway, model, project, project_id))
         self.conn.commit()
         return int(cur.lastrowid)
 
     def conversation(self, conv_id: int) -> Optional[sqlite3.Row]:
         return self.conn.execute("SELECT * FROM conversations WHERE id=?", (conv_id,)).fetchone()
 
-    def conversations(self, limit: int = 200, query: str = "") -> List[sqlite3.Row]:
+    def conversations(self, limit: int = 200, query: str = "", project_id: Optional[int] = None) -> List[sqlite3.Row]:
+        if project_id is not None:
+            return self.conn.execute("SELECT * FROM conversations WHERE project_id=? ORDER BY updated DESC LIMIT ?",
+                                     (project_id, limit)).fetchall()
         if query:
             like = f"%{query}%"
             return self.conn.execute(
@@ -196,3 +223,57 @@ class Store:
                 item["meta"] = {}
             out.append(item)
         return out
+
+    # ------------------------------------------------------------------ projects
+    PROJECT_FIELDS = ("name", "description", "instructions", "folder", "gateway", "model")
+
+    def new_project(self, **fields: Any) -> int:
+        now = time.time()
+        data = {k: str(fields.get(k) or "") for k in self.PROJECT_FIELDS}
+        data["name"] = data["name"].strip() or "مشروع"
+        cur = self.conn.execute(
+            "INSERT INTO projects(created, updated, name, description, instructions, folder, gateway, model) "
+            "VALUES (?,?,?,?,?,?,?,?)", (now, now, *[data[k] for k in self.PROJECT_FIELDS]))
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def project(self, project_id: int) -> Optional[sqlite3.Row]:
+        return self.conn.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
+
+    def projects(self) -> List[Dict[str, Any]]:
+        rows = self.conn.execute(
+            "SELECT p.*, (SELECT COUNT(*) FROM conversations c WHERE c.project_id=p.id) AS chats, "
+            "(SELECT COUNT(*) FROM project_files f WHERE f.project_id=p.id) AS files "
+            "FROM projects p ORDER BY p.updated DESC").fetchall()
+        return [dict(r) for r in rows]
+
+    def update_project(self, project_id: int, **fields: Any) -> None:
+        sets = {k: str(v or "") for k, v in fields.items() if k in self.PROJECT_FIELDS}
+        sets["updated"] = time.time()
+        cols = ", ".join(f"{k}=?" for k in sets)
+        self.conn.execute(f"UPDATE projects SET {cols} WHERE id=?", (*sets.values(), project_id))
+        self.conn.commit()
+
+    def delete_project(self, project_id: int) -> List[str]:
+        paths = [r["path"] for r in self.project_files(project_id)]
+        self.conn.execute("UPDATE conversations SET project_id=NULL WHERE project_id=?", (project_id,))
+        self.conn.execute("DELETE FROM project_files WHERE project_id=?", (project_id,))
+        self.conn.execute("DELETE FROM projects WHERE id=?", (project_id,))
+        self.conn.commit()
+        return paths
+
+    def add_project_file(self, project_id: int, name: str, path: str, size: int) -> int:
+        cur = self.conn.execute("INSERT INTO project_files(project_id, created, name, path, size) VALUES (?,?,?,?,?)",
+                                (project_id, time.time(), name, path, size))
+        self.conn.execute("UPDATE projects SET updated=? WHERE id=?", (time.time(), project_id))
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def project_files(self, project_id: int) -> List[sqlite3.Row]:
+        return self.conn.execute("SELECT * FROM project_files WHERE project_id=? ORDER BY id", (project_id,)).fetchall()
+
+    def remove_project_file(self, file_id: int) -> Optional[str]:
+        row = self.conn.execute("SELECT path FROM project_files WHERE id=?", (file_id,)).fetchone()
+        self.conn.execute("DELETE FROM project_files WHERE id=?", (file_id,))
+        self.conn.commit()
+        return row["path"] if row else None

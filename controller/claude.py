@@ -314,12 +314,13 @@ class ClaudeRuntime:
     def start_stream(self, gw: Gateway, model: Optional[str], project: Path, prompt: str,
                      resume: Optional[str] = None, permission_mode: Optional[str] = None,
                      allowed_tools: Optional[List[str]] = None, effort: Optional[str] = None,
-                     approval: Optional[Dict[str, str]] = None):
+                     approval: Optional[Dict[str, str]] = None, extra_args: Optional[List[str]] = None):
         """Start `claude -p --output-format stream-json`; returns (Popen, Session). Caller cleans up the session."""
         session = self.build_session(gw, model, project, approval=approval)
         args = print_args("stream-json", permission_mode, allowed_tools, 0, resume, effort)
         if approval:
             args += ["--permission-prompt-tool", "mcp__allinone_approval__approve"]
+        args += list(extra_args or [])
         kwargs: Dict[str, Any] = {}
         if not IS_WINDOWS:
             kwargs["start_new_session"] = True  # so Stop can end Claude Code and everything it started
