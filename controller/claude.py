@@ -179,7 +179,10 @@ class ClaudeRuntime:
 
     def build_session(self, gw: Gateway, model: Optional[str], project: Path,
                       approval: Optional[Dict[str, str]] = None,
-                      extra_servers: Optional[Dict[str, Any]] = None, account: Optional[str] = None) -> Session:
+                      extra_servers: Optional[Dict[str, Any]] = None, account: Optional[str] = None,
+                      light: Optional[Dict[str, Any]] = None) -> Session:
+        """light: the "🪶 light mode" — fewer tools, no extra MCP servers or plugins, no side requests,
+        so every request to the gateway is much smaller. {"tools": "Bash,Read,...", "env": {...}}"""
         root = self.ctx.cfg.root
         sid = time.strftime("%Y%m%d-%H%M%S") + "-" + _secrets.token_hex(3)
         run_dir = self.ctx.run_dir / f"session-{sid}"
@@ -227,7 +230,7 @@ class ClaudeRuntime:
         # mcp.json for this session
         mcp_src = self.ctx.cfg.abs_path(self.cfg.get("mcp_file") or "config/mcp.jsonc")
         servers: Dict[str, Any] = {}
-        if mcp_src.exists():
+        if mcp_src.exists() and not light:
             raw = jsonc.load(mcp_src)
             for name, spec in (raw.get("mcpServers") or raw).items():
                 if not isinstance(spec, dict) or not spec.get("enabled", True):
@@ -257,7 +260,10 @@ class ClaudeRuntime:
             raise ClaudeError(tr("Claude Code is not installed. Run: allinone install claude",
                                  "Claude Code غير مثبت. نفّذ: allinone install claude"))
         args = ["--settings", str(settings_path), "--mcp-config", str(mcp_path)]
-        for d in self.plugin_dirs():
+        if light:
+            args += ["--strict-mcp-config", "--tools", str(light.get("tools", ""))]
+            env_block.update({str(k): str(v) for k, v in (light.get("env") or {}).items()})
+        for d in ([] if light else self.plugin_dirs()):
             args += ["--plugin-dir", str(d)]
         args += [str(a) for a in render(list(self.cfg.get("extra_args") or []), mapping, self.ctx.secrets)]
 
@@ -322,9 +328,10 @@ class ClaudeRuntime:
                      allowed_tools: Optional[List[str]] = None, effort: Optional[str] = None,
                      approval: Optional[Dict[str, str]] = None, extra_args: Optional[List[str]] = None,
                      extra_env: Optional[Dict[str, str]] = None, extra_servers: Optional[Dict[str, Any]] = None,
-                     account: Optional[str] = None):
+                     account: Optional[str] = None, light: Optional[Dict[str, Any]] = None):
         """Start `claude -p --output-format stream-json`; returns (Popen, Session). Caller cleans up the session."""
-        session = self.build_session(gw, model, project, approval=approval, extra_servers=extra_servers, account=account)
+        session = self.build_session(gw, model, project, approval=approval, extra_servers=extra_servers, account=account,
+                                     light=light)
         session.env.update(extra_env or {})
         args = print_args("stream-json", permission_mode, allowed_tools, 0, resume, effort)
         if approval:

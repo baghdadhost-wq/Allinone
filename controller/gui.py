@@ -554,7 +554,9 @@ HANDOFF_TEMPLATE = """هذه مهمة بدأت في جلسة سابقة (ربم�
 {message}"""
 
 RESUME_LABEL = "▶ متابعة"
-FAST_MODEL = "allinone:fast"  # ⚡ the fastest usable tool-capable model (FreeLLMAPI)
+FAST_MODEL = "allinone:fast"
+QUICK_SYSTEM = ("أنت مساعد خبير. أجب بوضوح وإيجاز وبلغة المستخدم. هذا «سؤال سريع» بلا أدوات: لا تستطيع قراءة "
+                "الملفات أو تشغيل الأوامر، فإن احتاج الطلب ذلك فقل للمستخدم أن يطفئ «💬 سؤال سريع» ليتولاه smarter Code.")  # ⚡ the fastest usable tool-capable model (FreeLLMAPI)
 AUTO_RESUME_LABEL = "↻ متابعة تلقائية ({n}/{m})"
 
 # reason -> (title, retry automatically, wait seconds, how to resume, attempts)
@@ -914,6 +916,7 @@ class GuiApp:
         self.run_approvals: Dict[str, List[Dict[str, Any]]] = {}
         self.live: Dict[int, Dict[str, Any]] = {}
         self.model_cooldown: Dict[str, float] = {}
+        self.quick_stops: Dict[str, threading.Event] = {}
         self.resume_cancel: Dict[int, threading.Event] = {}
         self.approval_timeout = 1800.0
         self.httpd = None
@@ -1011,6 +1014,190 @@ class GuiApp:
         if "{answer}" not in tpl:
             tpl += "\n\n{answer}"
         return tpl.replace("{note}", note_line).replace("{answer}", answer).strip()
+
+    # ------------------------------------------------------------- quick question & light mode
+    def quick_cfg(self) -> Dict[str, Any]:
+        cfg = (self.ctx.cfg.get("gui") or {}).get("quick") or {}
+        return {"max_tokens": int(cfg.get("max_tokens", 4096)), "history_chars": int(cfg.get("history_chars", 24000)),
+                "timeout": float(cfg.get("timeout", 300)), "attachment_chars": int(cfg.get("attachment_chars", 20000))}
+
+    def light_cfg(self) -> Dict[str, Any]:
+        cfg = (self.ctx.cfg.get("gui") or {}).get("light") or {}
+        env = {"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "CLAUDE_CODE_DISABLE_TERMINAL_TITLE": "1",
+               "CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS": "1", "CLAUDE_CODE_DISABLE_BUNDLED_SKILLS": "1",
+               "CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS": "1",
+               "CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(cfg.get("max_output_tokens", 8192))}
+        env.update({str(k): str(v) for k, v in (cfg.get("env") or {}).items()})
+        return {"tools": str(cfg.get("tools", "Bash,Read,Edit,Write,Glob,Grep")), "env": env}
+
+    def light_spec(self, light: bool, quick: bool) -> Optional[Dict[str, Any]]:
+        """🪶 light: a few tools and no extras. 💬 quick on Claude (no direct API key): no tools at all."""
+        if not light and not quick:
+            return None
+        spec = self.light_cfg()
+        if quick:
+            spec["tools"] = ""
+        return spec
+
+    def quick_text(self, text: str, deep: bool, attachments: List[str]) -> str:
+        """What a quick question sends: the question (with the deep-thinking template if on) and small text files."""
+        body = text
+        if deep:
+            tpl = read_prompt(self.ctx, "deep_thinking.txt", "")
+            if tpl:
+                body = tpl.replace("[ينقل السؤال هنا]", text) if "[ينقل السؤال هنا]" in tpl else tpl + "\n\n" + text
+        room = self.quick_cfg()["attachment_chars"]
+        for a in attachments:
+            p_ = Path(a)
+            try:
+                if p_.stat().st_size > room * 4:
+                    continue
+                data = p_.read_bytes()
+                if b"\x00" in data[:4096]:
+                    continue  # not text: a quick question cannot open files
+                content = data.decode("utf-8", "replace")[:room]
+            except OSError:
+                continue
+            room -= len(content)
+            body += f"\n\n----- {p_.name} -----\n{content}"
+            if room <= 0:
+                break
+        return body
+
+    def _quick_turn(self, conv_id: int, gw, model: Optional[str], project_id: Optional[int], emit) -> None:
+        """💬 Quick question: straight to the gateway's /v1/messages, streamed, like its playground —
+        no smarter Code, no tools, a tiny request. For questions and explanations, not for changing files."""
+        import urllib.error
+        import urllib.request
+        store = self.store()
+        cfg = self.quick_cfg()
+        run_id = secrets.token_hex(6)
+        msgs = store.messages(conv_id)
+        emit({"type": "start", "run_id": run_id, "conversation_id": conv_id, "sent": msgs[-1]["sent"]})
+        tr_ = StreamTranslator()
+        base_meta: Dict[str, Any] = {"gateway": gw.name, "gateway_title": gw.title, "gateway_type": gw.type_name,
+                                     "quick": True}
+        error = ""
+        part = {"kind": "text", "text": "", "closed": True}
+        stop = threading.Event()
+        mdl = ""
+        try:
+            if flows.bring_up(self.ctx, gw, False):
+                self.started_gateways.add(gw.name)
+            tr_.mark("gateway_ready")
+            env = gw.claude_env(None if model in (None, "", FAST_MODEL) else model)
+            mdl = env.get("ANTHROPIC_MODEL") or "auto"
+            token = env.get("ANTHROPIC_AUTH_TOKEN") or env.get("ANTHROPIC_API_KEY") or ""
+            history: List[Dict[str, str]] = []
+            used = 0
+            for m in reversed(msgs):  # the newest turns that fit
+                meta = m.get("meta") or {}
+                if m["role"] == "user":
+                    content = m["sent"] if (meta.get("quick") or m is msgs[-1]) else m["display"]
+                else:
+                    content = m.get("display") or ""
+                if not content.strip():
+                    continue
+                if used + len(content) > cfg["history_chars"] and history:
+                    break
+                used += len(content)
+                history.insert(0, {"role": "user" if m["role"] == "user" else "assistant", "content": content})
+            while history and history[0]["role"] != "user":
+                history.pop(0)
+            merged: List[Dict[str, str]] = []  # the API wants user/assistant to alternate
+            for h in history:
+                if merged and merged[-1]["role"] == h["role"]:
+                    merged[-1]["content"] += "\n\n" + h["content"]
+                else:
+                    merged.append(dict(h))
+            system = read_prompt(self.ctx, "quick_system.txt", QUICK_SYSTEM)
+            proj = store.project(project_id) if project_id else None
+            if proj is not None and proj["instructions"].strip():
+                system += "\n\n" + proj["instructions"].strip()
+            body = json.dumps({"model": mdl, "max_tokens": cfg["max_tokens"], "system": system, "messages": merged,
+                               "stream": True}).encode("utf-8")
+            req = urllib.request.Request(gw.base_url.rstrip("/") + "/v1/messages", data=body, method="POST", headers={
+                "Content-Type": "application/json", "anthropic-version": "2023-06-01", "x-api-key": token,
+                "Authorization": f"Bearer {token}", "Accept": "text/event-stream"})
+            local = re.match(r"^https?://(127\.0\.0\.1|localhost|\[::1\])", gw.base_url)
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({})) if local else urllib.request.build_opener()
+            with self.lock:
+                self.quick_stops[run_id] = stop
+                self.run_conv[run_id] = conv_id
+                self.run_emit[run_id] = emit
+                self.live[conv_id] = {"run_id": run_id, "tr": tr_}
+            tr_.mark("launch")
+            tr_.mark("init")
+            tr_.parts.append(part)
+            first = True
+            with opener.open(req, timeout=cfg["timeout"]) as resp:
+                tr_.mark("model_start")
+                if "event-stream" in (resp.headers.get("Content-Type") or ""):
+                    for raw in resp:
+                        if stop.is_set():
+                            break
+                        line = raw.decode("utf-8", "replace").strip()
+                        if not line.startswith("data:"):
+                            continue
+                        try:
+                            evt = json.loads(line[5:].strip())
+                        except ValueError:
+                            continue
+                        et = evt.get("type")
+                        if et == "message_start":
+                            tr_._usage((evt.get("message") or {}).get("usage"))
+                        elif et == "content_block_delta" and (evt.get("delta") or {}).get("type") == "text_delta":
+                            chunk = evt["delta"].get("text") or ""
+                            if first and chunk:
+                                tr_.mark("first_token")
+                                first = False
+                            part["text"] += chunk
+                            emit({"type": "delta", "text": chunk})
+                        elif et == "error":
+                            error = str(((evt.get("error") or {}).get("message")) or evt)
+                            break
+                        elif et == "message_stop":
+                            break
+                else:  # a gateway that ignores "stream": one JSON answer
+                    data = json.loads(resp.read().decode("utf-8", "replace") or "{}")
+                    tr_._usage(data.get("usage"))
+                    text = "".join(b.get("text", "") for b in data.get("content") or [] if isinstance(b, dict))
+                    if data.get("error"):
+                        error = str((data["error"] or {}).get("message") if isinstance(data["error"], dict) else data["error"])
+                    tr_.mark("first_token")
+                    part["text"] = text
+                    emit({"type": "delta", "text": text})
+            tr_.mark("model_end", chars=len(part["text"]), max_gap=0)
+            tr_.mark("result")
+        except urllib.error.HTTPError as exc:
+            try:
+                detail = exc.read().decode("utf-8", "replace")
+                j = json.loads(detail)
+                detail = (j.get("error") or {}).get("message") if isinstance(j.get("error"), dict) else (j.get("error") or detail)
+            except Exception:
+                detail = str(exc)
+            error = f"API Error: {exc.code} {detail}"
+        except (urllib.error.URLError, OSError, GatewayError, RuntimeError, ValueError) as exc:
+            error = str(getattr(exc, "reason", "") or exc)
+        finally:
+            with self.lock:
+                self.quick_stops.pop(run_id, None)
+                self.run_conv.pop(run_id, None)
+                self.run_emit.pop(run_id, None)
+                self.live.pop(conv_id, None)
+        stopped = stop.is_set()
+        if error and not stopped:
+            emit({"type": "error", "text": error})
+            if not part["text"]:
+                tr_.parts[:] = [{"kind": "text", "text": error, "closed": True, "error": True}]
+        meta = {**base_meta, "model": mdl, "parts": tr_.parts or [part], "timeline": tr_.timeline,
+                "started_at": tr_.started, "ended_at": time.time(), "context_tokens": tr_.context_tokens,
+                "duration_ms": int((time.time() - tr_.started) * 1000), "stopped": stopped, "is_error": bool(error)}
+        if error and not stopped:
+            meta["interrupted"] = diagnose(gw.type_name, error)
+        mid = store.add_message(conv_id, "assistant", part["text"] if not error else (part["text"] or error), meta=meta)
+        store.update_conversation(conv_id, gateway=gw.name, model=model or "")
+        emit({"type": "saved", "message_id": mid, "meta": meta})
 
     # ------------------------------------------------------------- speed & size
     def context_cfg(self) -> Dict[str, Any]:
@@ -1251,6 +1438,11 @@ class GuiApp:
                 user_meta.update(expert=True, expert_chars=len(expert_answer))
             if resume_req:
                 user_meta["resume"] = "handoff" if force_new else "continue"
+            if req.get("quick") and gw.type_name != "anthropic":
+                user_meta["quick"] = True
+                store.add_message(conv_id, "user", text, self.quick_text(text, deep, attachments), user_meta)
+                self._quick_turn(conv_id, gw, model, project_id, emit)  # straight to the gateway, no smarter Code
+                return
             store.add_message(conv_id, "user", text, sent, user_meta)
 
             auto = self.auto_resume_cfg()
@@ -1365,6 +1557,9 @@ class GuiApp:
         if hook_env is not None and not verify:  # only the visual test: no command check
             hook_env.update(ALLINONE_VERIFY_CMD="", ALLINONE_VERIFY_DETECT="0")
         servers = None
+        light = self.light_spec(bool(req.get("light")), bool(req.get("quick")))
+        if light:
+            base_meta["light"] = True
         if visual:
             hook_env.update(self.visual_env(project_id, run_id, conv_id, visual_py))
             servers = self.browser_server(run_id, gw, visual_py)
@@ -1389,7 +1584,7 @@ class GuiApp:
                                                            effort=effort or None, approval=approval,
                                                            extra_args=self.run_extra_args(project_id, verify, visual),
                                                            extra_env={**limit_env, **(hook_env or {})},
-                                                           extra_servers=servers, account=account)
+                                                           extra_servers=servers, account=account, light=light)
             tr_.mark("launch")
             with self.lock:
                 self.runs[run_id] = proc
@@ -1630,6 +1825,10 @@ class GuiApp:
             conv = self.run_conv.get(run_id)
             if conv is not None and conv in self.resume_cancel:
                 self.resume_cancel[conv].set()  # a stopped reply must not resume by itself
+            quick = self.quick_stops.get(run_id)
+            if quick is not None:  # a quick question: stop reading the stream
+                quick.set()
+                return True
             if proc is None:
                 return False
             self.stopped.add(run_id)

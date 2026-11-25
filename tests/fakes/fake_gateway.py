@@ -59,6 +59,25 @@ class Handler(BaseHTTPRequestHandler):
         last = body["messages"][-1]["content"]
         if isinstance(last, list):
             last = " ".join(b.get("text", "") for b in last if isinstance(b, dict))
+        if "FAIL_429" in str(last):
+            return self._send(429, {"type": "error", "error": {"type": "rate_limit_error", "message": "All models are rate limited"}})
+        if body.get("stream"):  # Anthropic-style server-sent events, as real gateways send them
+            text = f"echo: {last}"
+            events = [("message_start", {"type": "message_start", "message": {"id": "msg_fake", "model": body.get("model"),
+                                                                            "usage": {"input_tokens": 7}}}),
+                      ("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})]
+            events += [("content_block_delta", {"type": "content_block_delta", "index": 0,
+                                                "delta": {"type": "text_delta", "text": text[i:i + 5]}}) for i in range(0, len(text), 5)]
+            events += [("content_block_stop", {"type": "content_block_stop", "index": 0}),
+                       ("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 3}}),
+                       ("message_stop", {"type": "message_stop"})]
+            data = "".join(f"event: {e}\ndata: {json.dumps(d)}\n\n" for e, d in events).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         return self._send(200, {
             "id": "msg_fake", "type": "message", "role": "assistant", "model": body.get("model"),
             "content": [{"type": "text", "text": f"echo: {last}"}],

@@ -246,6 +246,8 @@ pre.vout{white-space:pre-wrap;direction:ltr;text-align:left;max-height:200px;ove
           <button class="btn small ghost" id="attachBtn" title="">📎</button>
           <input type="file" id="fileInput" multiple hidden>
           <button class="btn small ghost" id="answerBtn">📥</button>
+          <label class="toggle" id="tQuick"><input type="checkbox" id="quick">💬 <span data-i="quick"></span></label>
+          <label class="toggle" id="tLight"><input type="checkbox" id="light">🪶 <span data-i="light"></span></label>
           <label class="toggle" id="tFailover"><input type="checkbox" id="failover">↪ <span data-i="failover"></span></label>
           <label class="toggle" id="tVisual"><input type="checkbox" id="visual">👁 <span data-i="visual"></span></label>
           <label class="toggle" id="tVerify"><input type="checkbox" id="verify">🔁 <span data-i="verify"></span></label>
@@ -272,6 +274,8 @@ const I18N = {
     vRound:"🔁 تحقق آلي (الجولة {n})", vPass:"✔ نجح", vFail:"✘ فشل (رمز {code}) — أُعيد الخطأ إلى النموذج ليصلحه", vSelf:"🔎 لا يوجد أمر تحقق؛ طُلب من النموذج أن يجرّب النتيجة بنفسه",
     vBadge:{passed:"✔ تم التحقق", failed:"✘ فشل التحقق بعد {n} جولات", fixing:"✘ آخر تحقق فشل", self:"🔎 جرّبه النموذج بنفسه", skipped:"", none:""},
     projVerify:"أمر التحقق (مثل npm test أو pytest — فارغ = اكتشاف تلقائي)",
+    quick:"سؤال سريع", quickTip:"يُرسل السؤال إلى البوابة مباشرة (مثل playground) دون smarter Code ودون أدوات: جواب سريع جداً، لكنه لا يقرأ ملفات المشروع ولا ينفّذ أوامر. أطفئه للعمل على المشروع.", quickBadge:"💬 سؤال سريع",
+    light:"وضع خفيف", lightTip:"smarter Code بأدوات أساسية فقط (أوامر، قراءة، تعديل، كتابة، بحث) ودون إضافات وطلبات جانبية: كل طلب أصغر بكثير فيصبح أسرع مع البوابات المجانية.", lightBadge:"🪶 خفيف",
     failover:"تحويل تلقائي", failoverTip:"إذا نفدت كل نماذج البوابة (429) أو توقفت، ينتقل العمل تلقائياً إلى البوابة التالية (FreeLLMAPI ← OmniRoute ← Claude) مع ملف تسليم يلخص ما أُنجز.",
     keys:"🔑 المفاتيح", keysTitle:"🔑 مفاتيح FreeLLMAPI — نماذج تدعم الأدوات", keysUsable:"نماذج صالحة الآن (تدعم الأدوات ولها مفتاح): {n}",
     keysKeyless:"⚡ تفعيل المزوّدين الذين لا يحتاجون مفتاحاً ({n})", keysKeylessNone:"كل المزوّدين بلا مفتاح مفعّلون.",
@@ -329,6 +333,8 @@ const I18N = {
     vRound:"🔁 Automatic check (round {n})", vPass:"✔ passed", vFail:"✘ failed (code {code}) — sent back to the model to fix", vSelf:"🔎 No check command; the model was asked to test its own result",
     vBadge:{passed:"✔ Verified", failed:"✘ Verification failed after {n} rounds", fixing:"✘ Last check failed", self:"🔎 Self-tested by the model", skipped:"", none:""},
     projVerify:"Check command (e.g. npm test or pytest — empty = detect)",
+    quick:"Quick question", quickTip:"Sends the question straight to the gateway (like the playground), without smarter Code and without tools: very fast, but it cannot read project files or run commands. Turn it off to work on the project.", quickBadge:"💬 quick",
+    light:"Light mode", lightTip:"smarter Code with only the basic tools (commands, read, edit, write, search) and no add-ons or side requests: every request is much smaller, so free gateways answer faster.", lightBadge:"🪶 light",
     failover:"Auto switch", failoverTip:"When every model of the gateway is busy (429) or it stops, the work moves on its own to the next gateway (FreeLLMAPI → OmniRoute → Claude) with a hand-over note.",
     keys:"🔑 Keys", keysTitle:"🔑 FreeLLMAPI keys — tool-capable models", keysUsable:"Usable models now (tool-capable, with a key): {n}",
     keysKeyless:"⚡ Enable the providers that need no key ({n})", keysKeylessNone:"All no-key providers are enabled.",
@@ -458,7 +464,7 @@ function applyLang(){
   document.querySelectorAll("[data-i]").forEach(e=>e.textContent=t(e.dataset.i));
   $("#newChat").textContent=t("newChat"); $("#search").placeholder=t("search"); $("#input").placeholder=t("placeholder");
   $("#langBtn").textContent = S.lang==="ar"?"EN":"ع"; $("#attachBtn").title=t("attach"); $("#quitBtn").textContent=t("quit");
-  $("#tSent").title=t("showSentTip"); $("#tFailover").title=t("failoverTip"); $("#keysBtn").textContent=t("keys"); $("#tVerify").title=t("verifyTip"); $("#tVisual").title=t("visualTip"); renderVisualToggle(); $("#answerBtn").title=t("answerTip"); $("#answerBtn").textContent="📥 "+t("answer"); $("#reportBtn").textContent=t("report"); $("#reportBtn").title=t("reportTip"); $("#preBtn").title=t("preTip");
+  $("#tSent").title=t("showSentTip"); $("#tFailover").title=t("failoverTip"); $("#tQuick").title=t("quickTip"); $("#tLight").title=t("lightTip"); $("#keysBtn").textContent=t("keys"); $("#tVerify").title=t("verifyTip"); $("#tVisual").title=t("visualTip"); renderVisualToggle(); $("#answerBtn").title=t("answerTip"); $("#answerBtn").textContent="📥 "+t("answer"); $("#reportBtn").textContent=t("report"); $("#reportBtn").title=t("reportTip"); $("#preBtn").title=t("preTip");
   $("#newChat").textContent = S.tab==="projects" ? t("newProject") : t("newChat");
   fillSelects(); renderPills(); renderPre(); renderProjChip(); S.view==="project" ? renderProjectView() : renderThread();
 }
@@ -477,7 +483,7 @@ $("#effort").onchange = e=>LS.set("effort", e.target.value);
 $("#perm").onchange = e=>LS.set("perm", e.target.value);
 
 /* ---------- toggles ---------- */
-for(const [id, key] of [["failover","failover"],["visual","visual"],["verify","verify"],["deep","deep"],["memory","memory"],["showSent","showSent"]]){
+for(const [id, key] of [["quick","quick"],["light","light"],["failover","failover"],["visual","visual"],["verify","verify"],["deep","deep"],["memory","memory"],["showSent","showSent"]]){
   const box = $("#"+id); box.checked = LS.get(key, key==="verify" || key==="visual");
   const lab = box.closest(".toggle"); lab.classList.toggle("on", box.checked);
   box.onchange = ()=>{ LS.set(key, box.checked); lab.classList.toggle("on", box.checked); if(key==="showSent"){ renderThread(); if(S.running) drawRun(S.running); } };
@@ -916,7 +922,7 @@ function SHOWALL(){ return $("#showSent").checked; }
 function userHTML(m){
   const meta = m.meta||{}; const showSent = SHOWALL() && m.sent && m.sent!==m.display;
   if(!SHOWALL() && meta.auto) return "";  // automatic continuations are part of "what happens"
-  const badges = [meta.deep?t("deepBadge"):"", meta.memory?t("memBadge"):"", (meta.attachments||[]).length?("📎 "+meta.attachments.length+" "+t("files")):"", meta.expert?t("expertBadge"):""].filter(Boolean);
+  const badges = [meta.deep?t("deepBadge"):"", meta.memory?t("memBadge"):"", (meta.attachments||[]).length?("📎 "+meta.attachments.length+" "+t("files")):"", meta.expert?t("expertBadge"):"", meta.quick?t("quickBadge"):""].filter(Boolean);
   return `<div class="msg user"><div class="bubble" dir="auto">${showSent?`<span class="sent-label">${esc(t("sentFull"))}</span>`+esc(m.sent):esc(m.display)}${badges.length?`<div class="badges">${badges.map(b=>`<span class="badge">${esc(b)}</span>`).join("")}</div>`:""}</div></div>`;
 }
 function toolHTML(p){
@@ -936,7 +942,7 @@ function approvalHTML(p){
   return `<div class="approval ${p.state?"done":""}"><div class="ap-h">🔐 ${esc(t("apTitle"))} <b dir="ltr">${esc(p.tool)}</b></div><pre>${esc(String(detail)+extra)}</pre>${state}</div>`;
 }
 function metaHTML(meta, text){
-  const bits = [brandText(meta.gateway_title||meta.gateway), maskModel(meta.model), meta.duration_ms?((meta.duration_ms/1000).toFixed(1)+" "+t("sec")):"", meta.num_turns?(meta.num_turns+" "+t("turns")):"", meta.cost_usd?("$"+Number(meta.cost_usd).toFixed(4)):""].filter(Boolean);
+  const bits = [meta.quick?t("quickBadge"):"", meta.light?t("lightBadge"):"", brandText(meta.gateway_title||meta.gateway), maskModel(meta.model), meta.duration_ms?((meta.duration_ms/1000).toFixed(1)+" "+t("sec")):"", meta.num_turns?(meta.num_turns+" "+t("turns")):"", meta.cost_usd?("$"+Number(meta.cost_usd).toFixed(4)):""].filter(Boolean);
   return `<div class="meta"><span>${bits.map(esc).join(" · ")}</span><button data-copytext>${esc(t("copy"))}</button><button data-mem>${esc(t("toMemory"))}</button></div>`;
 }
 function imgURL(p){ return "/api/image?path="+encodeURIComponent(p)+"&t="+encodeURIComponent(TOKEN); }
@@ -1083,7 +1089,7 @@ async function send(extra){
   const payload = {text, gateway:S.gateway, model:realModel($("#model").value.trim()), effort:$("#effort").value, permission_mode:$("#perm").value,
     deep, memory, attachments:atts, project:S.project, conversation_id:S.conv, resume,
     project_id:S.projectId, preapprove:S.preapprove, verify:$("#verify").checked, visual:$("#visual").checked, account:S.account,
-    failover:$("#failover").checked, handoff_from:(!S.conv && S.handoffFrom) ? S.handoffFrom.id : undefined};
+    failover:$("#failover").checked, quick:$("#quick").checked, light:$("#light").checked, handoff_from:(!S.conv && S.handoffFrom) ? S.handoffFrom.id : undefined};
   if(expert) payload.expert = expert;
   if(!resume){ S.attachments = []; renderChips(); }
   let finalMeta = null;

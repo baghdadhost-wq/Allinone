@@ -926,6 +926,63 @@ class GuiServerTests(unittest.TestCase):
         self.assertEqual(gui.diagnose("omniroute", "429 Too Many Requests")["wait"], 60)   # nothing said: default
 
 
+    def test_quick_question_goes_straight_to_the_gateway(self):
+        ev = self.chat(text=QUESTION, gateway="fake", quick=True)
+        conv_id = self.of(ev, "conversation")[0]["id"]
+        self.assertFalse(self.sb.record.exists())                  # smarter Code never ran
+        text = "".join(e["text"] for e in self.of(ev, "delta"))
+        self.assertEqual(text, "echo: " + QUESTION)                # streamed piece by piece
+        self.assertGreater(len(self.of(ev, "delta")), 1)
+        msgs = self.ctx.store().messages(conv_id)
+        self.assertTrue(msgs[0]["meta"]["quick"])
+        self.assertTrue(msgs[1]["meta"]["quick"])
+        self.assertEqual(msgs[1]["display"], "echo: " + QUESTION)
+        self.assertEqual(msgs[1]["meta"]["context_tokens"], 7)
+        req = [r for r in self.sb.gateway_requests() if (r.get("body") or {}).get("messages")][-1]["body"]
+        self.assertTrue(req["stream"])
+        self.assertNotIn("tools", req)
+        self.assertIn("سؤال سريع", req["system"])
+        # the next quick question carries the conversation
+        ev2 = self.chat(text="وماذا عن البصرة؟", gateway="fake", quick=True, conversation_id=conv_id)
+        req = [r for r in self.sb.gateway_requests() if (r.get("body") or {}).get("messages")][-1]["body"]
+        self.assertEqual([m["role"] for m in req["messages"]], ["user", "assistant", "user"])
+        self.assertEqual(req["messages"][1]["content"], "echo: " + QUESTION)
+        self.assertIn("echo: وماذا عن البصرة؟", "".join(e["text"] for e in self.of(ev2, "delta")))
+        # an ordinary turn afterwards uses smarter Code again
+        self.chat(text="اكمل", gateway="fake", conversation_id=conv_id)
+        self.assertTrue(self.sb.record.exists())
+
+    def test_quick_question_gateway_error_is_reported(self):
+        ev = self.chat(text="FAIL_429 " + QUESTION, gateway="fake", quick=True)
+        err = self.of(ev, "error")
+        self.assertTrue(err and "429" in err[0]["text"], ev)
+        saved = self.of(ev, "saved")[0]["meta"]
+        self.assertTrue(saved["is_error"] and saved["quick"])
+        self.assertTrue(saved.get("interrupted"))
+
+    def test_light_mode_sends_small_requests(self):
+        self.chat(text=QUESTION, gateway="fake", light=True)
+        rec = self.sb.read_record()
+        argv = rec["argv"]
+        self.assertIn("--strict-mcp-config", argv)
+        self.assertEqual(argv[argv.index("--tools") + 1], "Bash,Read,Edit,Write,Glob,Grep")
+        self.assertNotIn("--plugin-dir", argv)
+        self.assertEqual(rec["env"].get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"), "1")
+        self.assertEqual(rec["env"].get("CLAUDE_CODE_MAX_OUTPUT_TOKENS"), "8192")
+        # without it: everything as before
+        self.chat(text=QUESTION, gateway="fake")
+        argv = self.sb.read_record()["argv"]
+        self.assertNotIn("--tools", argv)
+
+    def test_quick_question_on_claude_runs_without_tools(self):
+        os.environ["FAKE_AUTH"] = "1"
+        ev = self.chat(text="hi", gateway="claude", quick=True)
+        self.assertTrue(self.of(ev, "delta"))
+        argv = self.sb.read_record()["argv"]
+        self.assertEqual(argv[argv.index("--tools") + 1], "")
+        self.assertIn("--strict-mcp-config", argv)
+
+
 class FreeLLMAPIAdminTests(unittest.TestCase):
     """The keys page talks to FreeLLMAPI's dashboard API; a small stand-in answers here."""
 
