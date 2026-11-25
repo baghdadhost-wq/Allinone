@@ -40,7 +40,7 @@ def call_mcp(spec, calls):
     for i, (name, args) in enumerate(calls, start=3):
         msgs.append({"jsonrpc": "2.0", "id": i, "method": "tools/call", "params": {"name": name, "arguments": args}})
     payload = "".join(json.dumps(m) + "\n" for m in msgs).encode()
-    out, err = proc.communicate(payload, timeout=60)
+    out, err = proc.communicate(payload, timeout=120)
     replies = [json.loads(line) for line in out.decode().splitlines() if line.strip()]
     return {"replies": replies, "stderr": err.decode()[-2000:]}
 
@@ -74,6 +74,28 @@ def stream(prompt, argv):
             {"type": "tool_use", "id": "toolu_1", "name": "Write", "input": {"file_path": "hello.txt", "content": "hi"}}]}})
         emit({"type": "user", "message": {"content": [
             {"type": "tool_result", "tool_use_id": "toolu_1", "content": "File created", "is_error": False}]}})
+    if "NEED_APPROVAL" in prompt:
+        # Like Claude Code: ask the --permission-prompt-tool before running a tool that needs approval.
+        decision = {"behavior": "deny", "message": "no permission tool"}
+        if "--permission-prompt-tool" in argv:
+            tool_name = argv[argv.index("--permission-prompt-tool") + 1]
+            server = tool_name.split("__")[1]
+            with open(argv[argv.index("--mcp-config") + 1], encoding="utf-8") as fh:
+                spec = json.load(fh)["mcpServers"][server]
+            for n in range(prompt.count("NEED_APPROVAL")):
+                res = call_mcp(spec, [["approve", {"tool_name": "Bash", "input": {"command": f"npm test {n}"},
+                                                   "tool_use_id": f"toolu_{n}"}]])
+                reply = next(r for r in res["replies"] if r.get("id") == 3)
+                decision = json.loads(reply["result"]["content"][0]["text"])
+                emit({"type": "assistant", "message": {"content": [
+                    {"type": "tool_use", "id": f"toolu_{n}", "name": "Bash", "input": {"command": f"npm test {n}"}}]}})
+                ok = decision["behavior"] == "allow"
+                emit({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": f"toolu_{n}",
+                      "content": "tests passed" if ok else "Permission denied: " + decision.get("message", ""),
+                      "is_error": not ok}]}})
+        else:
+            emit({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "toolu_x",
+                  "content": "This command requires approval", "is_error": True}]}})
     if "SLOW" in prompt:
         time.sleep(180)
     text = ask_gateway(prompt[-200:])

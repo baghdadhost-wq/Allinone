@@ -151,6 +151,68 @@ class GuiServerTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("--permission-mode") + 1], "plan")
         self.assertEqual(self.sb.read_record()["env"]["ANTHROPIC_MODEL"], "fake/model-2")
 
+    def _chat_async(self, **payload):
+        box = {}
+        th = threading.Thread(target=lambda: box.setdefault("events", self.chat(**payload)))
+        th.start()
+        return th, box
+
+    def _wait_pending(self, count=1):
+        for _ in range(600):
+            with self.app.lock:
+                items = list(self.app.pending.values())
+            if len(items) >= count:
+                return items
+            time.sleep(0.1)
+        self.fail("no approval request arrived")
+
+    def test_permission_requests_reach_the_page(self):
+        th, box = self._chat_async(text="run NEED_APPROVAL", gateway="fake", permission_mode="acceptEdits")
+        item = self._wait_pending()[0]
+        self.assertEqual(item["tool"], "Bash")
+        self.assertEqual(json.loads(self.call("/api/approval", {"id": item["id"], "allow": True})[1])["ok"], True)
+        th.join(90)
+        ev = box["events"]
+        self.assertEqual(self.of(ev, "approval")[0]["input"], {"command": "npm test 0"})
+        self.assertEqual(self.of(ev, "approval_done")[0]["behavior"], "allow")
+        self.assertEqual(self.of(ev, "tool_result")[0]["content"], "tests passed")
+        argv = self.sb.read_record()["argv"]
+        self.assertEqual(argv[argv.index("--permission-prompt-tool") + 1], "mcp__allinone_approval__approve")
+        conv_id = self.of(ev, "conversation")[0]["id"]
+
+        # deny
+        th, box = self._chat_async(text="again NEED_APPROVAL", gateway="fake", conversation_id=conv_id)
+        item = self._wait_pending()[0]
+        self.call("/api/approval", {"id": item["id"], "allow": False})
+        th.join(90)
+        res = self.of(box["events"], "tool_result")[0]
+        self.assertTrue(res["is_error"])
+        self.assertIn("denied", res["content"])
+
+        # "always in this chat": the second request of the same tool is answered without asking
+        th, box = self._chat_async(text="NEED_APPROVAL NEED_APPROVAL", gateway="fake", conversation_id=conv_id)
+        item = self._wait_pending()[0]
+        self.call("/api/approval", {"id": item["id"], "allow": True, "scope": "conversation"})
+        th.join(90)
+        ev = box["events"]
+        self.assertEqual(len(self.of(ev, "approval")), 1)
+        self.assertEqual([r["content"] for r in self.of(ev, "tool_result")], ["tests passed", "tests passed"])
+
+    def test_bypass_mode_has_no_prompt_tool(self):
+        ev = self.chat(text="hi", gateway="fake", permission_mode="bypassPermissions")
+        self.assertTrue(self.of(ev, "result"))
+        self.assertNotIn("--permission-prompt-tool", self.sb.read_record()["argv"])
+
+    def test_stop_while_waiting_for_permission(self):
+        th, box = self._chat_async(text="NEED_APPROVAL", gateway="fake")
+        self._wait_pending()
+        with self.app.lock:
+            run_id = next(iter(self.app.runs))
+        self.call("/api/stop", {"run_id": run_id})
+        th.join(60)
+        self.assertFalse(th.is_alive())
+        self.assertTrue(self.of(box["events"], "saved")[0]["meta"]["stopped"])
+
     def test_stop(self):
         result = {}
 

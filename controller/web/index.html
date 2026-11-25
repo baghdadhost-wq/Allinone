@@ -113,6 +113,12 @@ main{flex:1;display:flex;flex-direction:column;min-width:0}
 .chipfile button{border:0;background:transparent;color:var(--muted);padding:0}
 .chipfile.busy{opacity:.7}
 #gwPower.on{color:var(--err);border-color:rgba(192,57,43,.4)}
+.approval{border:2px solid var(--accent);border-radius:12px;padding:10px 12px;margin:10px 0;background:var(--panel)}
+.approval.done{border-width:1px;border-color:var(--line);opacity:.85}
+.approval .ap-h{font-weight:600;margin-bottom:6px}
+.approval pre{background:var(--code);border-radius:8px;padding:8px;direction:ltr;text-align:left;white-space:pre-wrap;max-height:220px;overflow:auto;font-size:12.5px;margin:0 0 8px}
+.approval .ap-btns{display:flex;gap:8px;flex-wrap:wrap}
+.approval .ap-state{font-size:13px;color:var(--muted)}
 .hint{max-width:820px;margin:6px auto 0;color:var(--muted);font-size:12px;text-align:center}
 @media (max-width:760px){#sidebar{position:fixed;z-index:5;height:100%}#app.side-hidden #sidebar{margin-inline-start:-290px}.field select,.field input{max-width:130px}}
 </style>
@@ -175,6 +181,8 @@ const I18N = {
     sentFull:"النص المرسل كاملاً", gwDefault:"افتراضي البوابة", effortNone:"تلقائي", deepBadge:"تفكير بعمق", memBadge:"Memory",
     files:"ملفات", attach:"إرفاق ملفات", export:"تصدير", startingGw:"جارٍ تشغيل البوابة…", loginOpened:"فُتحت نافذة تسجيل الدخول. أكمل التسجيل في المتصفح ثم عد هنا.",
     sec:"ث", turns:"دورات", stopGen:"إيقاف", working:"يعمل…", tool:"أداة",
+    apTitle:"Claude Code يطلب إذناً لاستخدام", apOnce:"سماح", apConv:"سماح دائماً في هذه المحادثة", apDeny:"رفض",
+    apAllowed:"✔ تم السماح", apDenied:"✘ تم الرفض",
     powerOn:"⏻ تشغيل", powerOff:"⏻ إيقاف", stoppingGw:"جارٍ الإيقاف…", gwStopped:"تم إيقاف البوابة.",
     quit:"⏻ إغلاق Allinone", quitAsk:"إغلاق Allinone؟ ستتوقف البوابات التي شغّلها والردود الجارية.", quitDone:"تم إغلاق Allinone. يمكنك إغلاق هذه الصفحة. لتشغيله مجدداً: gui.cmd",
     uploading:"جارٍ الرفع…", tooBig:"الملف {n} كبير جداً ({s} MB). الحد الأقصى {l} MB، ويمكن تغييره من gui.max_upload_mb في الإعدادات.",
@@ -189,6 +197,8 @@ const I18N = {
     sentFull:"Full text sent", gwDefault:"gateway default", effortNone:"auto", deepBadge:"deep thinking", memBadge:"Memory",
     files:"files", attach:"Attach files", export:"Export", startingGw:"Starting the gateway…", loginOpened:"A sign-in window was opened. Finish in your browser, then come back.",
     sec:"s", turns:"turns", stopGen:"Stop", working:"Working…", tool:"Tool",
+    apTitle:"Claude Code asks permission to use", apOnce:"Allow", apConv:"Always allow in this chat", apDeny:"Deny",
+    apAllowed:"✔ Allowed", apDenied:"✘ Denied",
     powerOn:"⏻ Start", powerOff:"⏻ Stop", stoppingGw:"Stopping…", gwStopped:"Gateway stopped.",
     quit:"⏻ Quit Allinone", quitAsk:"Quit Allinone? Gateways it started and running replies will stop.", quitDone:"Allinone was closed. You can close this page. To start it again: gui.cmd",
     uploading:"Uploading…", tooBig:"{n} is too large ({s} MB). The limit is {l} MB (gui.max_upload_mb in the config).",
@@ -384,6 +394,16 @@ function toolHTML(p){
   const state = p.result==null ? '<span class="spin"></span>' : (p.is_error?"✘":"✔");
   return `<details class="tool ${p.is_error?"error":""}" data-tool="${esc(p.id||"")}"><summary>${state} 🔧 <b>${esc(p.name||t("tool"))}</b> <span dir="ltr">${esc(String(brief).slice(0,90))}</span></summary><pre>${esc(inp)}</pre>${p.result!=null?`<pre>${esc(p.result)}</pre>`:""}</details>`;
 }
+function approvalHTML(p){
+  const i = p.input||{};
+  const detail = i.command || i.file_path || i.path || i.url || JSON.stringify(i, null, 2);
+  const extra = (i.command && i.description) ? "\n# "+i.description : "";
+  const state = p.state==="allow" ? `<span class="ap-state">${esc(t("apAllowed"))}</span>` : p.state==="deny" ? `<span class="ap-state">${esc(t("apDenied"))}</span>`
+    : `<div class="ap-btns"><button class="btn primary small" data-ap="${esc(p.id)}" data-act="once">${esc(t("apOnce"))}</button>
+       <button class="btn small" data-ap="${esc(p.id)}" data-act="conv">${esc(t("apConv"))}</button>
+       <button class="btn small" data-ap="${esc(p.id)}" data-act="deny">${esc(t("apDeny"))}</button></div>`;
+  return `<div class="approval ${p.state?"done":""}"><div class="ap-h">🔐 ${esc(t("apTitle"))} <b dir="ltr">${esc(p.tool)}</b></div><pre>${esc(String(detail)+extra)}</pre>${state}</div>`;
+}
 function metaHTML(meta, text){
   const bits = [meta.gateway_title||meta.gateway, meta.model, meta.duration_ms?((meta.duration_ms/1000).toFixed(1)+" "+t("sec")):"", meta.num_turns?(meta.num_turns+" "+t("turns")):"", meta.cost_usd?("$"+Number(meta.cost_usd).toFixed(4)):""].filter(Boolean);
   return `<div class="meta"><span>${bits.map(esc).join(" · ")}</span><button data-copytext>${esc(t("copy"))}</button><button data-mem>${esc(t("toMemory"))}</button></div>`;
@@ -478,7 +498,7 @@ async function send(){
 function handle(ev, run, userMsg){
   switch(ev.type){
     case "conversation": S.conv = ev.id; loadConvs(); break;
-    case "start": run.runId = ev.run_id; userMsg.sent = ev.sent; if($("#showSent").checked) renderThread(); break;
+    case "start": run.runId = ev.run_id; userMsg.sent = ev.sent; refreshState(); if($("#showSent").checked) renderThread(); break;
     case "notice": run.parts.push({kind:"notice", text:ev.text}); break;
     case "segment": run.parts.push({kind:"text", text:""}); break;
     case "delta": { let p = run.parts[run.parts.length-1]; if(!p || p.kind!=="text"){ p={kind:"text",text:""}; run.parts.push(p); } p.text += ev.text; break; }
@@ -487,6 +507,8 @@ function handle(ev, run, userMsg){
     case "tool_use": run.parts.push({kind:"tool", id:ev.id, name:ev.name, input:ev.input, result:null}); break;
     case "tool_result": { const p = run.parts.find(x=>x.kind==="tool" && x.id===ev.id); if(p){ p.result = ev.content; p.is_error = ev.is_error; } break; }
     case "error": run.parts.push({kind:"error", text:ev.text}); if(ev.need_login){ banner(ev.text, true); } break;
+    case "approval": run.parts.push({kind:"approval", id:ev.id, tool:ev.tool, input:ev.input, state:null}); break;
+    case "approval_done": { const p = run.parts.find(x=>x.kind==="approval" && x.id===ev.id); if(p) p.state = ev.behavior; break; }
     default: return;
   }
   drawRun(run);
@@ -495,10 +517,16 @@ let drawPending = false;
 function drawRun(run){
   if(drawPending) return; drawPending = true;
   requestAnimationFrame(()=>{ drawPending = false;
-    run.body.innerHTML = run.parts.map(p=> p.kind==="tool"?toolHTML(p) : p.kind==="thinking"?`<div class="thinking">${esc(p.text)}</div>`
+    run.body.innerHTML = run.parts.map(p=> p.kind==="tool"?toolHTML(p) : p.kind==="approval"?approvalHTML(p) : p.kind==="thinking"?`<div class="thinking">${esc(p.text)}</div>`
       : p.kind==="notice"?`<div class="notice">${esc(p.text)}</div>` : p.kind==="error"?`<div class="err">${esc(p.text)}</div>` : md(p.text)).join("")
       + (S.running===run?'<p class="cursor"></p>':"");
-    wire(run.body); scrollDown(false); });
+    wire(run.body);
+    run.body.querySelectorAll("[data-ap]").forEach(b=>b.onclick=async()=>{
+      const act = b.dataset.act, p = run.parts.find(x=>x.kind==="approval" && x.id===b.dataset.ap); if(!p || p.state) return;
+      p.state = act==="deny" ? "deny" : "allow"; drawRun(run);
+      try{ await api("/api/approval",{method:"POST",body:{id:p.id, allow:act!=="deny", scope:act==="conv"?"conversation":"once"}}); }catch(e){ banner(e.message,true); }
+    });
+    scrollDown(run.parts.some(x=>x.kind==="approval" && !x.state)); });
 }
 
 /* ---------- boot ---------- */

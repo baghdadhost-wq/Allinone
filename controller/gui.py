@@ -179,6 +179,11 @@ class GuiApp:
         self.lock = threading.Lock()
         self.runs: Dict[str, subprocess.Popen] = {}
         self.run_gateways: Dict[str, str] = {}
+        self.run_emit: Dict[str, Any] = {}
+        self.run_conv: Dict[str, int] = {}
+        self.pending: Dict[str, Dict[str, Any]] = {}
+        self.conv_allowed: Dict[int, set] = {}
+        self.approval_timeout = 1800.0
         self.httpd = None
         self.stopped: set = set()
         self.busy: set = set()
@@ -317,9 +322,23 @@ class GuiApp:
             effort = str(req.get("effort") or "")
             effort = effort if effort in EFFORTS else ""
             allowed = list((self.ctx.cfg.get("tasks") or {}).get("allowed_tools") or [])
+            write_lock = threading.Lock()
+            raw_emit = emit
+
+            def locked_emit(evt: Dict[str, Any]) -> None:
+                with write_lock:  # approvals arrive from another thread
+                    raw_emit(evt)
+
+            emit = locked_emit
+            with self.lock:
+                self.run_emit[run_id] = locked_emit
+                self.run_conv[run_id] = conv_id
+            approval = None
+            if mode != "bypassPermissions":
+                approval = {"url": self.base_url() + "/internal/approval", "token": self.token, "run_id": run_id}
             proc, session = self.ctx.claude().start_stream(gw, model, project, sent, resume=resume,
                                                            permission_mode=mode, allowed_tools=allowed,
-                                                           effort=effort or None)
+                                                           effort=effort or None, approval=approval)
             with self.lock:
                 self.runs[run_id] = proc
                 self.run_gateways[run_id] = gw.name
@@ -355,9 +374,12 @@ class GuiApp:
                     except OSError:
                         pass
                 session.cleanup()
+                self._deny_pending(run_id)
                 with self.lock:
                     self.runs.pop(run_id, None)
                     self.run_gateways.pop(run_id, None)
+                    self.run_emit.pop(run_id, None)
+                    self.run_conv.pop(run_id, None)
             stopped = run_id in self.stopped
             if tr_.result is None:
                 msg = tr("Stopped.", "تم الإيقاف.") if stopped else "\n".join(err_tail[-15:]) or tr(
@@ -381,12 +403,63 @@ class GuiApp:
                 self.busy.discard(conv_id)
                 self.stopped.discard(run_id)
 
+    # ------------------------------------------------------------- approvals
+    def base_url(self) -> str:
+        host = next((h for h in sorted(self.allowed_hosts) if h.startswith("127.0.0.1")), "127.0.0.1:8787")
+        return f"http://{host}"
+
+    def request_approval(self, run_id: str, tool_name: str, tool_input: Dict[str, Any]) -> Dict[str, Any]:
+        """Called (blocking) by approval_server.py; waits for the person to click Allow or Deny."""
+        with self.lock:
+            emit = self.run_emit.get(run_id)
+            conv = self.run_conv.get(run_id)
+            if conv is not None and tool_name in self.conv_allowed.get(conv, set()):
+                return {"behavior": "allow", "updatedInput": tool_input}
+            if emit is None:
+                return {"behavior": "deny", "message": "This run is no longer attached to the GUI."}
+            aid = secrets.token_hex(5)
+            item = {"id": aid, "run_id": run_id, "tool": tool_name, "input": tool_input,
+                    "event": threading.Event(), "decision": None}
+            self.pending[aid] = item
+        emit({"type": "approval", "id": aid, "tool": tool_name, "input": tool_input})
+        answered = item["event"].wait(self.approval_timeout)
+        with self.lock:
+            self.pending.pop(aid, None)
+        decision = item["decision"] if answered and item["decision"] else {
+            "behavior": "deny", "message": tr("No answer from the user in time.", "لم يُجب المستخدم في الوقت المحدد.")}
+        emit({"type": "approval_done", "id": aid, "behavior": decision["behavior"]})
+        return decision
+
+    def answer_approval(self, aid: str, allow: bool, scope: str = "once", message: str = "") -> bool:
+        with self.lock:
+            item = self.pending.get(aid)
+            if item is None:
+                return False
+            if allow:
+                item["decision"] = {"behavior": "allow", "updatedInput": item["input"]}
+                conv = self.run_conv.get(item["run_id"])
+                if scope == "conversation" and conv is not None:
+                    self.conv_allowed.setdefault(conv, set()).add(item["tool"])
+            else:
+                item["decision"] = {"behavior": "deny",
+                                    "message": message or tr("The user denied this action.", "رفض المستخدم هذا الإجراء.")}
+            item["event"].set()
+        return True
+
+    def _deny_pending(self, run_id: str) -> None:
+        with self.lock:
+            items = [i for i in self.pending.values() if i["run_id"] == run_id]
+        for item in items:
+            item["decision"] = {"behavior": "deny", "message": "Stopped."}
+            item["event"].set()
+
     def stop_run(self, run_id: str) -> bool:
         with self.lock:
             proc = self.runs.get(run_id)
             if proc is None:
                 return False
             self.stopped.add(run_id)
+        self._deny_pending(run_id)
         procs.kill_tree(proc.pid, timeout=5)
         return True
 
@@ -543,7 +616,7 @@ def make_handler(app: GuiApp):
             if not self._host_ok():
                 self._json(403, {"error": "bad host"})
                 return None
-            if parts.path.startswith("/api/") and not self._token_ok(query):
+            if parts.path.startswith(("/api/", "/internal/")) and not self._token_ok(query):
                 self._json(401, {"error": "bad token"})
                 return None
             return parts.path, query
@@ -617,6 +690,14 @@ def make_handler(app: GuiApp):
                 if path == "/api/upload":
                     return self._upload(query)
                 body = self._body()
+                if path == "/internal/approval":
+                    return self._json(200, app.request_approval(str(body.get("run_id") or ""),
+                                                                str(body.get("tool_name") or ""),
+                                                                body.get("input") if isinstance(body.get("input"), dict) else {}))
+                if path == "/api/approval":
+                    ok = app.answer_approval(str(body.get("id") or ""), bool(body.get("allow")),
+                                             str(body.get("scope") or "once"), str(body.get("message") or ""))
+                    return self._json(200, {"ok": ok})
                 if path == "/api/chat":
                     return self._chat(body)
                 if path == "/api/stop":

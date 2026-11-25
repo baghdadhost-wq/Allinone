@@ -177,7 +177,8 @@ class ClaudeRuntime:
                 dirs.append(p)
         return dirs
 
-    def build_session(self, gw: Gateway, model: Optional[str], project: Path) -> Session:
+    def build_session(self, gw: Gateway, model: Optional[str], project: Path,
+                      approval: Optional[Dict[str, str]] = None) -> Session:
         root = self.ctx.cfg.root
         sid = time.strftime("%Y%m%d-%H%M%S") + "-" + _secrets.token_hex(3)
         run_dir = self.ctx.run_dir / f"session-{sid}"
@@ -235,6 +236,17 @@ class ClaudeRuntime:
                     continue
                 clean = {k: v for k, v in spec.items() if k not in ("enabled", "only_with_gateway", "description")}
                 servers[name] = render(clean, mapping, self.ctx.secrets)
+        if approval:
+            # Permission prompts of -p runs go to the GUI (see claude/mcp/approval_server.py).
+            servers["allinone_approval"] = {
+                "command": self.ctx.python,
+                "args": [str(root / "claude" / "mcp" / "approval_server.py")],
+                "env": {"ALLINONE_APPROVAL_URL": approval["url"], "ALLINONE_APPROVAL_TOKEN": approval["token"],
+                        "ALLINONE_RUN_ID": approval["run_id"], "PYTHONIOENCODING": "utf-8"},
+            }
+            env_block.setdefault("MCP_TOOL_TIMEOUT", "3600000")  # a person may take a while to answer
+            settings["env"] = env_block
+            atomic_write_json(settings_path, settings, private=True)
         mcp_path = run_dir / "mcp.json"
         atomic_write_json(mcp_path, {"mcpServers": servers}, private=True)
 
@@ -301,10 +313,13 @@ class ClaudeRuntime:
 
     def start_stream(self, gw: Gateway, model: Optional[str], project: Path, prompt: str,
                      resume: Optional[str] = None, permission_mode: Optional[str] = None,
-                     allowed_tools: Optional[List[str]] = None, effort: Optional[str] = None):
+                     allowed_tools: Optional[List[str]] = None, effort: Optional[str] = None,
+                     approval: Optional[Dict[str, str]] = None):
         """Start `claude -p --output-format stream-json`; returns (Popen, Session). Caller cleans up the session."""
-        session = self.build_session(gw, model, project)
+        session = self.build_session(gw, model, project, approval=approval)
         args = print_args("stream-json", permission_mode, allowed_tools, 0, resume, effort)
+        if approval:
+            args += ["--permission-prompt-tool", "mcp__allinone_approval__approve"]
         kwargs: Dict[str, Any] = {}
         if not IS_WINDOWS:
             kwargs["start_new_session"] = True  # so Stop can end Claude Code and everything it started

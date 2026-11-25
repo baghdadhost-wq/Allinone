@@ -93,7 +93,11 @@ def _call(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
     if not entry:
         return {"content": [{"type": "text", "text": f"Unknown tool: {name}"}], "isError": True}
     try:
-        value = entry["fn"](**(arguments or {}))
+        args = dict(arguments or {})
+        params = inspect.signature(entry["fn"]).parameters
+        if not any(p.kind == p.VAR_KEYWORD for p in params.values()):
+            args = {k: v for k, v in args.items() if k in params}  # ignore unknown extras
+        value = entry["fn"](**args)
     except Exception as exc:  # report to Claude instead of crashing the server
         log(traceback.format_exc())
         return {"content": [{"type": "text", "text": f"{type(exc).__name__}: {exc}"}], "isError": True}
