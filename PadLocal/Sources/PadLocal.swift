@@ -123,6 +123,13 @@ struct Message:Identifiable {
     var content:String
 }
 @MainActor final class Chat:ObservableObject {
+    let diagnostics = Diagnostics()
+    private var generationID: UUID?
+    func logError(_ error: Error, context: String, operation: UUID? = nil) {
+        let detail = error as NSError
+        let message = (error as? Issue)?.text ?? context
+        diagnostics.record(operation == nil ? "error" : "end", message + " (" + detail.domain + " " + String(detail.code) + ")", level:"error", model:entry.name, operation:operation)
+    }
     @Published var entry=Entry.choices[0]
     @Published var turns:[Message]=[]
     @Published var prompt=""
@@ -139,14 +146,14 @@ struct Message:Identifiable {
         do {
             try files.createDirectory(at:models,withIntermediateDirectories:true)
             var url=models,values=URLResourceValues();values.isExcludedFromBackup=true;try url.setResourceValues(values)
-        } catch {status=error.localizedDescription}
+        } catch {logError(error, context:"تهيئة مجلد التطبيق");status=error.localizedDescription}
         if let saved = UserDefaults.standard.data(forKey: "modelFolder") {
             do { try chooseFolder(resolve(saved)) }
-            catch { folderAvailable = false; status = "تعذر فتح مجلد التنزيلات. أعد اختياره من الملفات." }
+            catch { logError(error,context:"استعادة مجلد التنزيل"); folderAvailable = false; status = "تعذر فتح مجلد التنزيلات. أعد اختياره من الملفات." }
         }
         for (id, data) in links.sorted(by: { $0.key < $1.key }) {
             do { try register(resolve(data), id: id, persist: false) }
-            catch { status = "تعذر فتح أحد النماذج المضافة. أعد اختياره من الملفات." }
+            catch { logError(error,context:"استعادة نموذج مضاف"); status = "تعذر فتح أحد النماذج المضافة. أعد اختياره من الملفات." }
         }
         refresh()
     }
@@ -190,6 +197,7 @@ struct Message:Identifiable {
         }
         folderScope?.stopAccessingSecurityScopedResource()
         folderScope = scoped ? url : nil
+        diagnostics.record("folder","اختيار مجلد التنزيل")
         folder = url
         folderAvailable = true
         turns = []
@@ -228,11 +236,12 @@ struct Message:Identifiable {
         }
         let id = "file:" + UUID().uuidString
         try register(url, id: id, persist: true)
+        diagnostics.record("import","إضافة نموذج محلي",model:url.lastPathComponent)
         if let item = manual.first(where: { $0.id == id }) { select(item) }
     }
 
     func refresh(){installed=(isManual || folderAvailable) && files.fileExists(atPath:path.path)}
-    func select(_ value:Entry){guard !busy else{return};entry=value;turns=[];status="";refresh()}
+    func select(_ value:Entry){guard !busy else{return};entry=value;diagnostics.record("select","اختيار النموذج",model:value.name);turns=[];status="";refresh()}
     func remove(){
         guard !busy else{return}
         if isManual {
@@ -244,13 +253,14 @@ struct Message:Identifiable {
             UserDefaults.standard.set(links, forKey: "modelLinks")
             select(Entry.choices[0])
         } else {
-            do {try files.removeItem(at:path);try? files.removeItem(at:path.appendingPathExtension("jinja"));turns=[];refresh()}catch{status=error.localizedDescription}
+            do {try files.removeItem(at:path);try? files.removeItem(at:path.appendingPathExtension("jinja"));turns=[];refresh()}catch{logError(error,context:"حذف النموذج");status=error.localizedDescription}
         }
     }
     func fetch(){
         guard !busy, folderAvailable, !isManual else{return};busy=true;fetching=true;status="قراءة معلومات الملف…"
         let current=entry
         let id = UUID(); transferID = id; byteCount = 0; expectedBytes = 0
+        diagnostics.record("download","بدء تنزيل النموذج",model:current.name,operation:id)
         task=Task {
             defer{busy=false;fetching=false;refresh();task=nil}
             do {try await download(current,to:folder,progress:{ received,total in
@@ -259,18 +269,25 @@ struct Message:Identifiable {
                     self.expectedBytes = total
                     self.byteCount = max(self.byteCount,min(total,received))
                 }
-            }) { self.status = $0 };status="جاهز للعمل دون اتصال"}
-            catch {status=Task.isCancelled ? "ألغي التنزيل" : error.localizedDescription}
+            }) { self.status = $0; self.diagnostics.record("stage",$0,model:current.name,operation:id) };status="جاهز للعمل دون اتصال"; diagnostics.record("end",status,model:current.name,operation:id)}
+            catch {
+                status = Task.isCancelled ? "ألغي التنزيل" : error.localizedDescription
+                if Task.isCancelled { diagnostics.record("end",status,model:current.name,operation:id) }
+                else { logError(error,context:"فشل تنزيل النموذج بعد " + sizeText(byteCount),operation:id) }
+            }
         }
     }
-    func stop(){ if fetching {task?.cancel()}else{PLStop()} }
+    func stop(){ diagnostics.record("stop","طلب إيقاف العملية",model:entry.name,operation:fetching ? transferID : generationID); if fetching {task?.cancel()}else{PLStop()} }
     func send(){
         let q=prompt.trimmingCharacters(in:.whitespacesAndNewlines)
         guard installed,!busy,!q.isEmpty else{return}
-        guard q.utf8.count<100_000 else {status="الرسالة طويلة جدا";return}
+        let id = UUID()
+        diagnostics.record("generate","طلب توليد محلي",model:entry.name,operation:id,prompt:q)
+        guard q.utf8.count<100_000 else {status="الرسالة طويلة جدا";diagnostics.record("end",status,level:"warning",model:entry.name,operation:id);return}
         guard Int64(PLAvailable()) > entry.estimate+350_000_000 else {
-            status="هامش RAM المتاح منخفض لهذا النموذج. أغلق التطبيقات الأخرى أو اختر نموذجا أصغر.";return
+            status="هامش RAM المتاح منخفض لهذا النموذج. أغلق التطبيقات الأخرى أو اختر نموذجا أصغر.";diagnostics.record("end",status,level:"warning",model:entry.name,operation:id);return
         }
+        generationID = id
         PLResetStop();busy=true;status="تحميل النموذج إلى الذاكرة…";prompt=""
         turns.append(Message(role:"user",content:q))
         let history=turns.map{["role":$0.role,"content":$0.content]}
@@ -291,6 +308,8 @@ struct Message:Identifiable {
                 turns.removeLast(2);prompt=q
             } else {turns[turns.count-1].content=result.0}
             status=result.1 ?? (result.0.isEmpty ? "توقف التوليد دون نص" : "اكتمل الرد المحلي")
+            diagnostics.record("end",status,level:result.1 == nil ? "info" : "error",model:entry.name,operation:id)
+            generationID = nil
             busy=false
         }
     }
@@ -331,6 +350,7 @@ struct Message:Identifiable {
                     Text(chat.status)
                 }
             }
+            NavigationLink("سجل التشخيص") { DiagnosticsView(log:chat.diagnostics) }
             Section("موارد الجهاز"){
                 TimelineView(.periodic(from:.now,by:2)){_ in
                     VStack(alignment:.leading){
@@ -367,7 +387,7 @@ struct Message:Identifiable {
                 let url = try result.get()
                 if pickingFolder { try chat.chooseFolder(url) } else { try chat.importModel(url) }
             } catch where (error as NSError).code == NSUserCancelledError { }
-              catch { chat.status = error.localizedDescription }
+              catch { chat.logError(error,context:"اختيار ملف أو مجلد"); chat.status = error.localizedDescription }
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { attached = PLDebugAttached() }
