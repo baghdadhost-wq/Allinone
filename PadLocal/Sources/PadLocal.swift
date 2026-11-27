@@ -38,22 +38,31 @@ struct Card: Decodable {
     let sha:String
     let siblings:[Sibling]
 }
-private final class TransferMeter: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
-    let report: @Sendable (Int64) -> Void
-    private var lastUpdate = -Double.infinity
-    init(report: @escaping @Sendable (Int64) -> Void) { self.report = report }
-
-    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
-                    didWriteData bytesWritten: Int64, totalBytesWritten: Int64,
-                    totalBytesExpectedToWrite: Int64) {
-        let now = ProcessInfo.processInfo.systemUptime
-        if now - lastUpdate >= 0.25 || totalBytesWritten == totalBytesExpectedToWrite {
-            lastUpdate = now
-            report(totalBytesWritten)
-        }
+private func transfer(_ url: URL, progress: @escaping @Sendable (Int64) -> Void) async throws -> (URL, URLResponse) {
+    let (results, finish) = AsyncThrowingStream<(URL, URLResponse), Error>.makeStream()
+    let task = URLSession.shared.downloadTask(with: url) { temporary, response, error in
+        if let error { finish.finish(throwing: error); return }
+        guard let temporary, let response else { finish.finish(throwing: URLError(.badServerResponse)); return }
+        let saved = files.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        do {
+            try files.moveItem(at: temporary, to: saved)
+            if case .terminated = finish.yield((saved, response)) { try? files.removeItem(at: saved) }
+            finish.finish()
+        } catch { finish.finish(throwing: error) }
     }
-    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
-                    didFinishDownloadingTo location: URL) {}
+    return try await withTaskCancellationHandler {
+        try Task.checkCancellation()
+        task.resume()
+        let monitor = Task {
+            while !Task.isCancelled {
+                progress(task.countOfBytesReceived)
+                try await Task.sleep(nanoseconds: 250_000_000)
+            }
+        }
+        defer { monitor.cancel() }
+        for try await result in results { return result }
+        throw CancellationError()
+    } onCancel: { task.cancel() }
 }
 
 func download(_ entry:Entry,to folder:URL,progress:@escaping @Sendable (Int64, Int64)->Void,status:@escaping @MainActor (String)->Void) async throws {
@@ -67,8 +76,7 @@ func download(_ entry:Entry,to folder:URL,progress:@escaping @Sendable (Int64, I
     progress(0, blob.size)
     await status("تنزيل "+sizeText(blob.size)+"…")
     let url=URL(string:"https://huggingface.co")!.appendingPathComponent(entry.repo).appendingPathComponent("resolve").appendingPathComponent(card.sha).appendingPathComponent(entry.file)
-    let meter = TransferMeter { progress($0, blob.size) }
-    let (temp,reply)=try await URLSession.shared.download(from:url, delegate:meter)
+    let (temp,reply) = try await transfer(url) { progress($0, blob.size) }
     defer {try? files.removeItem(at:temp)}
     guard (reply as? HTTPURLResponse)?.statusCode==200 else {throw Issue("فشل تنزيل الأوزان.")}
     progress(blob.size, blob.size)
@@ -344,7 +352,7 @@ struct Message:Identifiable {
                     if chat.expectedBytes > 0 {
                         let fraction = Double(chat.byteCount) / Double(chat.expectedBytes)
                         ProgressView(value:fraction)
-                        Text(sizeText(chat.byteCount) + " من " + sizeText(chat.expectedBytes) + " · " + fraction.formatted(.percent.precision(.fractionLength(1))))
+                        Text((chat.byteCount == 0 ? "بانتظار أول بيانات" : sizeText(chat.byteCount)) + " من " + sizeText(chat.expectedBytes) + " · " + fraction.formatted(.percent.precision(.fractionLength(1))))
                             .monospacedDigit()
                     } else { ProgressView() }
                     Text(chat.status)
