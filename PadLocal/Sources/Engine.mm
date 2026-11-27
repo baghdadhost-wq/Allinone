@@ -78,7 +78,17 @@ NSString *PLGenerate(NSString *path,NSArray<NSDictionary<NSString *,NSString *> 
     if(!ctx)return fail(@"تعذر حجز ذاكرة السياق.");
     const auto *v=llama_model_get_vocab(model.get());
     const char *tmpl=llama_model_chat_template(model.get(),nullptr);
-    if(!tmpl)return fail(@"قالب المحادثة مفقود.");
+    NSString *externalTemplate = nil;
+    if (!tmpl) {
+        NSString *sidecar = [path stringByAppendingPathExtension:@"jinja"];
+        NSDictionary *attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:sidecar error:nil];
+        if ([attributes fileSize] > 0 && [attributes fileSize] <= 512 * 1024) {
+            externalTemplate = [NSString stringWithContentsOfFile:sidecar encoding:NSUTF8StringEncoding error:nil];
+        }
+    }
+    std::string templateCopy = tmpl ? tmpl : (externalTemplate.UTF8String ?: "");
+    if (templateCopy.empty()) return fail(@"قالب المحادثة مفقود. يلزم ملف GGUF يتضمن القالب أو ملف قالب مرافق.");
+    tmpl = templateCopy.c_str();
     std::vector<llama_chat_message> msgs;
     for(NSDictionary *m in turns) msgs.push_back({[m[@"role"] UTF8String],[m[@"content"] UTF8String]});
     std::vector<llama_token> tokens;

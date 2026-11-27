@@ -38,7 +38,25 @@ struct Card: Decodable {
     let sha:String
     let siblings:[Sibling]
 }
-func download(_ entry:Entry,to folder:URL,status:@escaping @Sendable (String)->Void) async throws {
+private final class TransferMeter: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+    let report: @Sendable (Int64) -> Void
+    private var lastUpdate = -Double.infinity
+    init(report: @escaping @Sendable (Int64) -> Void) { self.report = report }
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
+                    didWriteData bytesWritten: Int64, totalBytesWritten: Int64,
+                    totalBytesExpectedToWrite: Int64) {
+        let now = ProcessInfo.processInfo.systemUptime
+        if now - lastUpdate >= 0.25 || totalBytesWritten == totalBytesExpectedToWrite {
+            lastUpdate = now
+            report(totalBytesWritten)
+        }
+    }
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
+                    didFinishDownloadingTo location: URL) {}
+}
+
+func download(_ entry:Entry,to folder:URL,progress:@escaping @Sendable (Int64, Int64)->Void,status:@escaping @MainActor (String)->Void) async throws {
     let api=URL(string:"https://huggingface.co/api/models/"+entry.repo+"?blobs=true")!
     let (metadata,response)=try await URLSession.shared.data(from:api)
     guard (response as? HTTPURLResponse)?.statusCode == 200 else {throw Issue("تعذرت قراءة معلومات النموذج.")}
@@ -46,12 +64,15 @@ func download(_ entry:Entry,to folder:URL,status:@escaping @Sendable (String)->V
     guard let blob=card.siblings.first(where:{$0.rfilename==entry.file})?.lfs, blob.size>0,
           blob.sha256.count==64,card.sha.count==40 else {throw Issue("تعذر التحقق من بصمة الملف.")}
     guard disk(folder)>blob.size+300_000_000 else {throw Issue("مساحة التخزين المتاحة غير كافية.")}
-    status("تنزيل "+sizeText(blob.size)+"…")
+    progress(0, blob.size)
+    await status("تنزيل "+sizeText(blob.size)+"…")
     let url=URL(string:"https://huggingface.co")!.appendingPathComponent(entry.repo).appendingPathComponent("resolve").appendingPathComponent(card.sha).appendingPathComponent(entry.file)
-    let (temp,reply)=try await URLSession.shared.download(from:url)
+    let meter = TransferMeter { progress($0, blob.size) }
+    let (temp,reply)=try await URLSession.shared.download(from:url, delegate:meter)
     defer {try? files.removeItem(at:temp)}
     guard (reply as? HTTPURLResponse)?.statusCode==200 else {throw Issue("فشل تنزيل الأوزان.")}
-    status("التحقق من سلامة الأوزان…")
+    progress(blob.size, blob.size)
+    await status("التحقق من سلامة الأوزان…")
     let handle=try FileHandle(forReadingFrom:temp)
     defer {try? handle.close()}
     var hash=SHA256(),length:Int64=0
@@ -61,7 +82,39 @@ func download(_ entry:Entry,to folder:URL,status:@escaping @Sendable (String)->V
     }
     guard length==blob.size,hash.finalize().map({String(format:"%02x",$0)}).joined()==blob.sha256.lowercased() else {throw Issue("بصمة الملف لا تطابق النسخة المنشورة.")}
     try Task.checkCancellation()
-    try files.moveItem(at:temp,to:folder.appendingPathComponent(entry.localName))
+    let destination = folder.appendingPathComponent(entry.localName)
+    let sidecar = destination.appendingPathExtension("jinja")
+    let companion = entry.file.split(separator:"/").dropLast().map(String.init) + ["chat_template.jinja"]
+    let templatePath = [companion.joined(separator:"/"), "chat_template.jinja"].first { path in
+        card.siblings.contains { $0.rfilename == path }
+    }
+    var installedTemplate = false
+    if let templatePath, !files.fileExists(atPath:sidecar.path) {
+        await status("تجهيز قالب المحادثة المرافق…")
+        let revision = URL(string:"https://huggingface.co")!.appendingPathComponent(entry.repo)
+            .appendingPathComponent("resolve").appendingPathComponent(card.sha)
+        do {
+            let (stream, response) = try await URLSession.shared.bytes(from:revision.appendingPathComponent(templatePath))
+            if (response as? HTTPURLResponse)?.statusCode == 200 {
+                var bytes = Data()
+                for try await byte in stream {
+                    if bytes.count >= 512 * 1024 { throw Issue("قالب المحادثة كبير جدا.") }
+                    bytes.append(byte)
+                }
+                if !bytes.isEmpty, String(data:bytes,encoding:.utf8) != nil {
+                    try bytes.write(to:sidecar,options:.withoutOverwriting)
+                    installedTemplate = true
+                }
+            }
+        } catch { try Task.checkCancellation() }
+    }
+    do {
+        try Task.checkCancellation()
+        try files.moveItem(at:temp,to:destination)
+    } catch {
+        if installedTemplate { try? files.removeItem(at:sidecar) }
+        throw error
+    }
 }
 
 struct Message:Identifiable {
@@ -76,6 +129,9 @@ struct Message:Identifiable {
     @Published var status=""
     @Published var busy=false
     @Published var fetching=false
+    @Published var byteCount: Int64 = 0
+    @Published var expectedBytes: Int64 = 0
+    private var transferID = UUID()
     @Published var jit=false
     @Published var installed=false
     var task:Task<Void,Never>?
@@ -188,15 +244,22 @@ struct Message:Identifiable {
             UserDefaults.standard.set(links, forKey: "modelLinks")
             select(Entry.choices[0])
         } else {
-            do {try files.removeItem(at:path);turns=[];refresh()}catch{status=error.localizedDescription}
+            do {try files.removeItem(at:path);try? files.removeItem(at:path.appendingPathExtension("jinja"));turns=[];refresh()}catch{status=error.localizedDescription}
         }
     }
     func fetch(){
         guard !busy, folderAvailable, !isManual else{return};busy=true;fetching=true;status="قراءة معلومات الملف…"
         let current=entry
+        let id = UUID(); transferID = id; byteCount = 0; expectedBytes = 0
         task=Task {
             defer{busy=false;fetching=false;refresh();task=nil}
-            do {try await download(current,to:folder){msg in Task{@MainActor in self.status=msg}};status="جاهز للعمل دون اتصال"}
+            do {try await download(current,to:folder,progress:{ received,total in
+                Task { @MainActor in
+                    guard self.fetching, self.transferID == id else { return }
+                    self.expectedBytes = total
+                    self.byteCount = max(self.byteCount,min(total,received))
+                }
+            }) { self.status = $0 };status="جاهز للعمل دون اتصال"}
             catch {status=Task.isCancelled ? "ألغي التنزيل" : error.localizedDescription}
         }
     }
@@ -256,6 +319,17 @@ struct Message:Identifiable {
                 if chat.isManual {Button("إزالة من القائمة"){chat.remove()}.disabled(chat.busy)}
                 else if chat.installed {Button("حذف الأوزان من الجهاز",role:.destructive){confirmDelete=true}.disabled(chat.busy)}
                 else {Button("تنزيل النموذج"){chat.fetch()}.disabled(chat.busy || !chat.folderAvailable)}
+            }
+            if chat.fetching {
+                Section("تقدم التنزيل") {
+                    if chat.expectedBytes > 0 {
+                        let fraction = Double(chat.byteCount) / Double(chat.expectedBytes)
+                        ProgressView(value:fraction)
+                        Text(sizeText(chat.byteCount) + " من " + sizeText(chat.expectedBytes) + " · " + fraction.formatted(.percent.precision(.fractionLength(1))))
+                            .monospacedDigit()
+                    } else { ProgressView() }
+                    Text(chat.status)
+                }
             }
             Section("موارد الجهاز"){
                 TimelineView(.periodic(from:.now,by:2)){_ in
